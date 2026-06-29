@@ -2,6 +2,13 @@
 
 `portage-release-watch` is a Gentoo Portage release watcher for local overlays. It scans ebuilds in a local Portage repository, infers upstream release sources, compares local `PV`/`PVR` with upstream versions using Gentoo Portage version semantics, and writes both human-readable and JSON reports.
 
+<p align="center">
+  <img src="docs/assets/hero-overlay-release-watch-flow.png" alt="portage-release-watch workflow showing local overlay ebuilds, release watcher scanning, upstream signals, cache, and JSON report output" width="100%">
+</p>
+
+<p align="center"><em>Local-first release intelligence for Gentoo maintainers: scan ebuilds, resolve upstreams, cache provider responses, and report without mutating your overlay.</em></p>
+
+
 ## What it does
 
 This tool is a Gentoo overlay release checker and Portage overlay upstream monitor. It answers: “which packages in my local overlay have newer upstream releases, which ones require manual/no-fetch vendor checks, and which `9999` live ebuilds are diverging from their fixed ebuild siblings?”
@@ -54,6 +61,12 @@ A workstation-style install with daily cron and sync-time visibility is explicit
 sudo scripts/install-system.sh --overlay /path/to/local/overlay --scheduler cron --postsync
 ```
 
+<p align="center">
+  <img src="docs/assets/terminal-report-snapshot.png" alt="portage-release-watch terminal report showing updates, manual checks, and live-only ebuild status" width="100%">
+</p>
+
+<p align="center"><em>The human report separates ordinary updates from manual vendor checks and `9999` live-only packages.</em></p>
+
 ## Commands
 
 ```text
@@ -76,6 +89,11 @@ Exit codes:
 - `2`: `check --fail-on-updates` found updates.
 
 ## How source discovery works
+
+<p align="center">
+  <img src="docs/assets/source-discovery-precedence-map.png" alt="Source discovery precedence: explicit config, pypi inherit, GitHub, GitLab, metadata remote-id, manual vendor checks, unmapped warnings" width="100%">
+</p>
+<p align="center"><em>Source detection is deterministic: explicit package config wins, HOMEPAGE-only guesses stay ignored, and ambiguous vendor downloads become manual checks.</em></p>
 
 Dynamic source discovery is enabled by default. Explicit config always wins. If no explicit package rule exists, the resolver uses this precedence:
 
@@ -142,6 +160,11 @@ State/cache defaults:
 - overrides: `PORTAGE_RELEASE_WATCH_STATE` and `PORTAGE_RELEASE_WATCH_CACHE`.
 
 ## Scheduling and notifications
+
+<p align="center">
+  <img src="docs/assets/gentoo-system-integration-map.png" alt="Gentoo system integration map showing opt-in install, cron, postsync, state, cache, and notification hooks" width="100%">
+</p>
+<p align="center"><em>System integration is opt-in: package installation does not silently enable cron, postsync hooks, or notifications.</em></p>
 
 `install-system` writes files only when explicitly invoked. Defaults are safe: `--scheduler none` and `--no-postsync`.
 
