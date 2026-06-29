@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "dynamic": { "enabled": true },
+  "notify_repeat_hours": 168,
+  "notify_hooks_dir": "/etc/portage/release-watch.notify.d",
+  "packages": {
+    "app-misc/example-ledger-like-bin": {
+      "status": "auto",
+      "note": "Example: upstream tag has a package prefix before the version.",
+      "source": {
+        "type": "github",
+        "repo": "OWNER/REPO",
+        "mode": "releases",
+        "version_regex": "^(?:package-name@|v)?(?P<version>\\d+(?:\\.\\d+)+)$"
+      }
+    },
+    "dev-python/example-alpha-tags": {
+      "status": "auto",
+      "note": "Example: include alpha/prerelease tags when the ebuild intentionally tracks them.",
+      "source": {
+        "type": "github",
+        "repo": "OWNER/REPO",
+        "mode": "tags",
+        "include_prereleases": true,
+        "version_regex": "^v(?P<version>\\d+(?:\\.\\d+)+)-alpha1$"
+      }
+    },
+    "media-video/example-nofetch-vendor": {
+      "status": "manual_no_fetch",
+      "note": "Example: proprietary/no-fetch vendor with no stable machine-readable API.",
+      "source": { "type": "manual", "url": "https://example.com/downloads" }
+    },
+    "www-client/example-nightly-bin": {
+      "status": "live_only",
+      "note": "Example: live/nightly package; suppress fixed-release comparison.",
+      "source": { "type": "live", "url": "https://example.com/nightly/latest/" }
+    }
+  }
+}

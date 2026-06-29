@@ -1,0 +1,244 @@
+{
+  "config": "builtin",
+  "config_sources": [],
+  "generated_at": "2026-06-29T15:13:13Z",
+  "live": [
+    {
+      "compare": 1,
+      "cp": "app-emulation/qemu",
+      "ebuilds": [
+        "app-emulation/qemu/qemu-11.0.1.ebuild",
+        "app-emulation/qemu/qemu-9999.ebuild"
+      ],
+      "live_divergence": "9999 ebuild present; fixed ebuild 11.0.1 trails latest matched release v11.0.2",
+      "live_present": true,
+      "local_pv": "11.0.1",
+      "local_pvr": "11.0.1",
+      "mapping_origin": "inferred:metadata",
+      "mapping_status": "auto",
+      "message": "11.0.1 -> v11.0.2",
+      "pn": "qemu",
+      "source": {
+        "exclude_regex": "(?:alpha|beta|rc)",
+        "host": "gitlab.com",
+        "project": "qemu-project/qemu",
+        "type": "gitlab",
+        "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"
+      },
+      "status": "outdated",
+      "upstream": {
+        "asset_status": null,
+        "raw": "v11.0.2",
+        "released_at": "2026-06-27T00:00:00Z",
+        "source_id": "gitlab:gitlab.com/qemu-project/qemu",
+        "url": "https://gitlab.com/qemu-project/qemu/-/tags/v11.0.2",
+        "version": "11.0.2"
+      }
+    },
+    {
+      "cp": "www-client/firefox-nightly-bin",
+      "ebuilds": [
+        "www-client/firefox-nightly-bin/firefox-nightly-bin-9999.ebuild"
+      ],
+      "live_present": true,
+      "local_pv": "9999",
+      "local_pvr": "9999",
+      "mapping_origin": "inferred:live",
+      "mapping_status": "live_only",
+      "message": "Dynamically inferred live-only package; fixed-release comparison suppressed.",
+      "pn": "firefox-nightly-bin",
+      "source": {
+        "type": "live"
+      },
+      "status": "live"
+    }
+  ],
+  "manual": [
+    {
+      "cp": "media-video/davinci-resolve",
+      "ebuilds": [
+        "media-video/davinci-resolve/davinci-resolve-21.0.1.ebuild"
+      ],
+      "live_present": false,
+      "local_pv": "21.0.1",
+      "local_pvr": "21.0.1",
+      "mapping_origin": "inferred:manual",
+      "mapping_status": "manual_no_fetch",
+      "message": "Dynamically inferred vendor/manual package; no stable release API configured.",
+      "pn": "davinci-resolve",
+      "source": {
+        "type": "manual"
+      },
+      "status": "manual"
+    }
+  ],
+  "overlay": "tests/fixtures/overlay",
+  "packages": [
+    {
+      "compare": 1,
+      "cp": "app-emulation/qemu",
+      "ebuilds": [
+        "app-emulation/qemu/qemu-11.0.1.ebuild",
+        "app-emulation/qemu/qemu-9999.ebuild"
+      ],
+      "live_divergence": "9999 ebuild present; fixed ebuild 11.0.1 trails latest matched release v11.0.2",
+      "live_present": true,
+      "local_pv": "11.0.1",
+      "local_pvr": "11.0.1",
+      "mapping_origin": "inferred:metadata",
+      "mapping_status": "auto",
+      "message": "11.0.1 -> v11.0.2",
+      "pn": "qemu",
+      "source": {
+        "exclude_regex": "(?:alpha|beta|rc)",
+        "host": "gitlab.com",
+        "project": "qemu-project/qemu",
+        "type": "gitlab",
+        "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"
+      },
+      "status": "outdated",
+      "upstream": {
+        "asset_status": null,
+        "raw": "v11.0.2",
+        "released_at": "2026-06-27T00:00:00Z",
+        "source_id": "gitlab:gitlab.com/qemu-project/qemu",
+        "url": "https://gitlab.com/qemu-project/qemu/-/tags/v11.0.2",
+        "version": "11.0.2"
+      }
+    },
+    {
+      "compare": 1,
+      "cp": "app-misc/fastfetch",
+      "ebuilds": [
+        "app-misc/fastfetch/fastfetch-2.65.1.ebuild"
+      ],
+      "live_present": false,
+      "local_pv": "2.65.1",
+      "local_pvr": "2.65.1",
+      "mapping_origin": "inferred:github-src-uri",
+      "mapping_status": "auto",
+      "message": "2.65.1 -> 2.65.2",
+      "pn": "fastfetch",
+      "source": {
+        "exclude_regex": "(?:alpha|beta|rc|nightly)",
+        "mode": "auto",
+        "repo": "fastfetch-cli/fastfetch",
+        "type": "github",
+        "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"
+      },
+      "status": "outdated",
+      "upstream": {
+        "asset_status": null,
+        "raw": "2.65.2",
+        "released_at": "2026-06-28T00:00:00Z",
+        "source_id": "github:fastfetch-cli/fastfetch",
+        "url": "https://github.com/fastfetch-cli/fastfetch/releases/tag/2.65.2",
+        "version": "2.65.2"
+      }
+    },
+    {
+      "cp": "media-video/davinci-resolve",
+      "ebuilds": [
+        "media-video/davinci-resolve/davinci-resolve-21.0.1.ebuild"
+      ],
+      "live_present": false,
+      "local_pv": "21.0.1",
+      "local_pvr": "21.0.1",
+      "mapping_origin": "inferred:manual",
+      "mapping_status": "manual_no_fetch",
+      "message": "Dynamically inferred vendor/manual package; no stable release API configured.",
+      "pn": "davinci-resolve",
+      "source": {
+        "type": "manual"
+      },
+      "status": "manual"
+    },
+    {
+      "cp": "www-client/firefox-nightly-bin",
+      "ebuilds": [
+        "www-client/firefox-nightly-bin/firefox-nightly-bin-9999.ebuild"
+      ],
+      "live_present": true,
+      "local_pv": "9999",
+      "local_pvr": "9999",
+      "mapping_origin": "inferred:live",
+      "mapping_status": "live_only",
+      "message": "Dynamically inferred live-only package; fixed-release comparison suppressed.",
+      "pn": "firefox-nightly-bin",
+      "source": {
+        "type": "live"
+      },
+      "status": "live"
+    }
+  ],
+  "summary": {
+    "live": 1,
+    "manual": 1,
+    "outdated": 2
+  },
+  "updates": [
+    {
+      "compare": 1,
+      "cp": "app-emulation/qemu",
+      "ebuilds": [
+        "app-emulation/qemu/qemu-11.0.1.ebuild",
+        "app-emulation/qemu/qemu-9999.ebuild"
+      ],
+      "live_divergence": "9999 ebuild present; fixed ebuild 11.0.1 trails latest matched release v11.0.2",
+      "live_present": true,
+      "local_pv": "11.0.1",
+      "local_pvr": "11.0.1",
+      "mapping_origin": "inferred:metadata",
+      "mapping_status": "auto",
+      "message": "11.0.1 -> v11.0.2",
+      "pn": "qemu",
+      "source": {
+        "exclude_regex": "(?:alpha|beta|rc)",
+        "host": "gitlab.com",
+        "project": "qemu-project/qemu",
+        "type": "gitlab",
+        "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"
+      },
+      "status": "outdated",
+      "upstream": {
+        "asset_status": null,
+        "raw": "v11.0.2",
+        "released_at": "2026-06-27T00:00:00Z",
+        "source_id": "gitlab:gitlab.com/qemu-project/qemu",
+        "url": "https://gitlab.com/qemu-project/qemu/-/tags/v11.0.2",
+        "version": "11.0.2"
+      }
+    },
+    {
+      "compare": 1,
+      "cp": "app-misc/fastfetch",
+      "ebuilds": [
+        "app-misc/fastfetch/fastfetch-2.65.1.ebuild"
+      ],
+      "live_present": false,
+      "local_pv": "2.65.1",
+      "local_pvr": "2.65.1",
+      "mapping_origin": "inferred:github-src-uri",
+      "mapping_status": "auto",
+      "message": "2.65.1 -> 2.65.2",
+      "pn": "fastfetch",
+      "source": {
+        "exclude_regex": "(?:alpha|beta|rc|nightly)",
+        "mode": "auto",
+        "repo": "fastfetch-cli/fastfetch",
+        "type": "github",
+        "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"
+      },
+      "status": "outdated",
+      "upstream": {
+        "asset_status": null,
+        "raw": "2.65.2",
+        "released_at": "2026-06-28T00:00:00Z",
+        "source_id": "github:fastfetch-cli/fastfetch",
+        "url": "https://github.com/fastfetch-cli/fastfetch/releases/tag/2.65.2",
+        "version": "2.65.2"
+      }
+    }
+  ],
+  "warnings": []
+}

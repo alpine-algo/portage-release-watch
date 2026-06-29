@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/local/bin/portage-release-watch --system --overlay 'OVERLAY_PATH' --config 'CONFIG_PATH' --state-dir 'STATE_DIR' --cache-dir 'CACHE_DIR' --timeout-seconds 30 --max-age-hours 24 check --quiet --notify

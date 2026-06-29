@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portage-release-watch"
+version = "0.1.0"
+description = "Gentoo Portage local overlay upstream release watcher"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "portage-release-watch contributors" }]
+keywords = [
+  "gentoo", "portage", "ebuild", "ebuilds", "overlay", "gentoo-overlay",
+  "portage-overlay", "local-overlay", "upstream-release", "release-monitoring",
+  "release-checker", "github-releases", "github-tags", "gitlab-tags", "pypi",
+  "9999-ebuild", "live-ebuild", "openrc", "cron", "postsync"
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+portage-release-watch = "portage_release_watch.cli:main"
+prw = "portage_release_watch.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/alpine-algo/portage-release-watch"
+Repository = "https://github.com/alpine-algo/portage-release-watch"
+Issues = "https://github.com/alpine-algo/portage-release-watch/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portage_release_watch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

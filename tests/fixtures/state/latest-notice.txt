@@ -1,0 +1,13 @@
+Local Portage overlay release report (2026-06-29T15:13:13Z)
+Overlay: tests/fixtures/overlay
+
+Updates available:
+  app-emulation/qemu                 11.0.1         -> v11.0.2  gitlab:gitlab.com/qemu-project/qemu
+    live: 9999 ebuild present; fixed ebuild 11.0.1 trails latest matched release v11.0.2
+  app-misc/fastfetch                 2.65.1         -> 2.65.2  github:fastfetch-cli/fastfetch
+
+Manual/no-fetch checks:
+  media-video/davinci-resolve        21.0.1         Dynamically inferred vendor/manual package; no stable release API configured.
+
+Live-only / 9999 status:
+  www-client/firefox-nightly-bin     Dynamically inferred live-only package; fixed-release comparison suppressed.

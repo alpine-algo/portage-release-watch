@@ -1,0 +1,27 @@
+{
+  "body": [
+    {
+      "assets": [],
+      "draft": false,
+      "html_url": "https://github.com/fastfetch-cli/fastfetch/releases/tag/2.65.2",
+      "name": "2.65.2",
+      "prerelease": false,
+      "published_at": "2026-06-28T00:00:00Z",
+      "tag_name": "2.65.2"
+    },
+    {
+      "assets": [],
+      "draft": false,
+      "html_url": "https://github.com/fastfetch-cli/fastfetch/releases/tag/2.65.1",
+      "name": "2.65.1",
+      "prerelease": false,
+      "published_at": "2026-06-20T00:00:00Z",
+      "tag_name": "2.65.1"
+    }
+  ],
+  "etag": "fixture",
+  "fetched_at": 4102444800,
+  "last_modified": null,
+  "status": 200,
+  "url": "https://api.github.com/repos/fastfetch-cli/fastfetch/releases?per_page=100"
+}

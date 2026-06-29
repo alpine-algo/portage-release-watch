@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pkgmetadata>
+  <upstream>
+    <remote-id type="gitlab">qemu-project/qemu</remote-id>
+  </upstream>
+</pkgmetadata>

@@ -1,0 +1,21 @@
+{
+  "body": [
+    {
+      "name": "v11.0.2",
+      "release": {
+        "released_at": "2026-06-27T00:00:00Z"
+      }
+    },
+    {
+      "name": "v11.0.1",
+      "release": {
+        "released_at": "2026-06-01T00:00:00Z"
+      }
+    }
+  ],
+  "etag": "fixture",
+  "fetched_at": 4102444800,
+  "last_modified": null,
+  "status": 200,
+  "url": "https://gitlab.com/api/v4/projects/qemu-project%2Fqemu/repository/tags?per_page=100&order_by=version&sort=desc"
+}
