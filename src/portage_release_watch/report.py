@@ -75,7 +75,7 @@ def evaluate_package(info: PackageInfo, rule: dict[str, Any] | None, http: HttpC
 
 
 def build_report(rows: list[dict[str, Any]], config_sources: list[str], overlay: Path) -> dict[str, Any]:
-    now = _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     summary: dict[str, int] = {}
     for row in rows:
         summary[row["status"]] = summary.get(row["status"], 0) + 1
