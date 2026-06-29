@@ -16,6 +16,20 @@ keywords = [
   "release-checker", "github-releases", "github-tags", "gitlab-tags", "pypi",
   "9999-ebuild", "live-ebuild", "openrc", "cron", "postsync"
 ]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Software Distribution",
+  "Topic :: Utilities",
+]
 dependencies = []
 
 [project.optional-dependencies]

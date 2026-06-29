@@ -31,6 +31,22 @@ Use this when you maintain:
 - an `emerge --sync` postsync hook or `emaint sync` postsync hook;
 - Gentoo package maintenance automation around a local Portage repository updater.
 
+## Install
+
+For a user-local CLI install directly from the public repository:
+
+```sh
+python -m pip install 'git+https://github.com/alpine-algo/portage-release-watch.git@v0.1.0'
+```
+
+If you prefer isolated CLI tools, `pipx` works too:
+
+```sh
+pipx install 'git+https://github.com/alpine-algo/portage-release-watch.git@v0.1.0'
+```
+
+The GitHub release also publishes wheel and source distribution artifacts for downstream packagers. Real release decisions on a Gentoo system require the Gentoo Portage Python API; non-Gentoo hosts are intended for tests, fixture parsing, and dry-run documentation.
+
 ## Quick start
 
 From a checkout:
