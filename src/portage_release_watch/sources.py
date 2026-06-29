@@ -1,26 +1,34 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import re
+import tarfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from .config import USER_AGENT
-from .http import HttpClient
+from .http import HttpClient, atomic_write_json
 from .models import Candidate, PackageInfo, WatchError
 from .overlay import read_metadata_remote_ids, read_selected_ebuild
 from .versioning import candidate_allowed, extract_version
 
+DEFAULT_INFERRED_VERSION_RE = r"(?P<version>\d+(?:\.\d+)+(?:[._-]?[A-Za-z][A-Za-z0-9]*)*)"
+DEFAULT_INFERRED_VERSION_REGEX = rf"^v?{DEFAULT_INFERRED_VERSION_RE}$"
+
 
 def source_from_remote_id(kind: str, value: str, info: PackageInfo) -> dict[str, Any] | None:
     if kind == "github" and "/" in value:
-        return {"type": "github", "repo": value, "mode": "auto", "version_regex": r"^v?(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$"}
+        return {"type": "github", "repo": value, "mode": "auto", "version_regex": DEFAULT_INFERRED_VERSION_REGEX}
     if kind == "gitlab" and "/" in value:
-        return {"type": "gitlab", "host": "gitlab.com", "project": value, "version_regex": r"^v?(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$", "exclude_regex": r"(?:alpha|beta|rc)"}
+        return {"type": "gitlab", "host": "gitlab.com", "project": value, "version_regex": DEFAULT_INFERRED_VERSION_REGEX, "exclude_regex": r"(?:alpha|beta|rc)"}
     if kind in ("gnome-gitlab", "gnomegitlab") and "/" in value:
-        return {"type": "gitlab", "host": "gitlab.gnome.org", "project": value, "version_regex": r"^v?(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$", "exclude_regex": r"(?:alpha|beta|rc|\.9\d$)"}
+        return {"type": "gitlab", "host": "gitlab.gnome.org", "project": value, "version_regex": DEFAULT_INFERRED_VERSION_REGEX, "exclude_regex": r"(?:alpha|beta|rc|\.9\d$)"}
     if kind == "pypi":
         return {"type": "pypi", "project": value, "version_regex": r"^(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$"}
     return None
@@ -101,7 +109,7 @@ def github_source_from_ebuild(text: str, info: PackageInfo) -> dict[str, Any] | 
     _score, repo, url = scored[0]
     mode = "releases" if "releases/download" in url else "auto"
     prefix = "^v?" if "v${PV" in url or re.search(r"/v?\$\{PV", url) else "^v?"
-    return {"type": "github", "repo": repo, "mode": mode, "version_regex": prefix + r"(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$", "exclude_regex": r"(?:alpha|beta|rc|nightly)"}
+    return {"type": "github", "repo": repo, "mode": mode, "version_regex": prefix + DEFAULT_INFERRED_VERSION_RE + "$", "exclude_regex": r"(?:alpha|beta|rc|nightly)"}
 
 
 def gitlab_source_from_ebuild(text: str, info: PackageInfo) -> dict[str, Any] | None:
@@ -109,7 +117,7 @@ def gitlab_source_from_ebuild(text: str, info: PackageInfo) -> dict[str, Any] | 
         found = gitlab_project_from_url(url, info)
         if found:
             host, project = found
-            return {"type": "gitlab", "host": host, "project": project, "version_regex": r"^v?(?P<version>\d+(?:\.\d+)+(?:[._-]?\w+)*)$", "exclude_regex": r"(?:alpha|beta|rc)"}
+            return {"type": "gitlab", "host": host, "project": project, "version_regex": DEFAULT_INFERRED_VERSION_REGEX, "exclude_regex": r"(?:alpha|beta|rc)"}
     return None
 
 
@@ -249,6 +257,135 @@ def url_regex_candidates(source: dict[str, Any], http: HttpClient, force: bool) 
     return candidates
 
 
+def _cached_url_bytes(url: str, http: HttpClient, force: bool, accept: str) -> bytes:
+    path = http._cache_path(url)
+    cached = http._read_cache(path)
+    now = time.time()
+
+    def cached_body() -> bytes | None:
+        if not cached:
+            return None
+        if isinstance(cached.get("body_base64"), str):
+            return base64.b64decode(cached["body_base64"])
+        if isinstance(cached.get("body"), str):
+            return cached["body"].encode("latin1")
+        return None
+
+    body = cached_body()
+    if body is not None and not force and now - cached.get("fetched_at", 0) < http.max_age:
+        return body
+
+    headers = {"User-Agent": USER_AGENT, "Accept": accept}
+    if cached:
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("last_modified"):
+            headers["If-Modified-Since"] = cached["last_modified"]
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=http.timeout) as resp:
+            body = resp.read()
+            atomic_write_json(path, {
+                "url": url,
+                "status": resp.status,
+                "fetched_at": now,
+                "etag": resp.headers.get("ETag"),
+                "last_modified": resp.headers.get("Last-Modified"),
+                "body_base64": base64.b64encode(body).decode("ascii"),
+            })
+            return body
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304 and body is not None and cached:
+            cached["fetched_at"] = now
+            atomic_write_json(path, cached)
+            return body
+        if body is not None and cached:
+            cached["stale_error"] = f"HTTP {exc.code} {exc.reason}"
+            atomic_write_json(path, cached)
+            return body
+        raise WatchError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
+    except Exception as exc:
+        if body is not None and cached:
+            cached["stale_error"] = repr(exc)
+            atomic_write_json(path, cached)
+            return body
+        raise WatchError(f"{url}: {exc}") from exc
+
+
+def _debian_control_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if not line:
+            current = None
+            continue
+        if line[0].isspace() and current:
+            fields[current] += "\n" + line.strip()
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current = key.lower()
+        fields[current] = value.strip()
+    return fields
+
+
+def _control_fields_from_deb(deb: bytes, source_id: str) -> dict[str, str]:
+    if not deb.startswith(b"!<arch>\n"):
+        raise WatchError(f"{source_id}: not a Debian ar archive")
+    offset = 8
+    while offset + 60 <= len(deb):
+        header = deb[offset:offset + 60]
+        name = header[:16].decode("utf-8", "replace").strip().rstrip("/")
+        try:
+            size = int(header[48:58].decode("ascii").strip())
+        except ValueError as exc:
+            raise WatchError(f"{source_id}: invalid ar member size") from exc
+        start = offset + 60
+        end = start + size
+        if end > len(deb):
+            raise WatchError(f"{source_id}: truncated ar member")
+        if name.startswith("control.tar"):
+            try:
+                with tarfile.open(fileobj=io.BytesIO(deb[start:end]), mode="r:*") as tar:
+                    for member in tar.getmembers():
+                        if member.name.lstrip("./") != "control" or not member.isfile():
+                            continue
+                        extracted = tar.extractfile(member)
+                        if extracted is None:
+                            break
+                        return _debian_control_fields(extracted.read().decode("utf-8", "replace"))
+            except tarfile.TarError as exc:
+                raise WatchError(f"{source_id}: invalid control archive") from exc
+            raise WatchError(f"{source_id}: missing control file")
+        offset = end + (end % 2)
+    raise WatchError(f"{source_id}: missing control archive")
+
+
+def deb_control_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+    url = source["url"]
+    source_id = f"deb-control:{url}"
+    body = _cached_url_bytes(url, http, force, "application/vnd.debian.binary-package, application/octet-stream, */*")
+    fields = _control_fields_from_deb(body, source_id)
+    package = source.get("package")
+    if package and fields.get("package") != package:
+        return []
+    raw = fields.get(source.get("field", "Version").lower())
+    if not raw:
+        return []
+    normalize = source.get("normalize")
+    if normalize is None:
+        version = raw
+    elif normalize == "debian-hyphen-to-gentoo-dot":
+        version = raw.replace("-", ".")
+    else:
+        raise WatchError(f"{source_id}: unsupported normalize {normalize!r}")
+    if not candidate_allowed(raw, version, source):
+        return []
+    return [Candidate(raw, version, url, source_id)]
+
+
 def fetch_candidates(source: dict[str, Any], http: HttpClient, force: bool = False) -> list[Candidate]:
     typ = source.get("type")
     if typ == "github":
@@ -257,6 +394,8 @@ def fetch_candidates(source: dict[str, Any], http: HttpClient, force: bool = Fal
         return gitlab_candidates(source, http, force)
     if typ == "pypi":
         return pypi_candidates(source, http, force)
+    if typ == "deb-control":
+        return deb_control_candidates(source, http, force)
     if typ == "url-regex":
         return url_regex_candidates(source, http, force)
     if typ in ("manual", "live"):

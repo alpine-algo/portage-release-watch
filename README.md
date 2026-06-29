@@ -159,7 +159,7 @@ Built-in defaults:
 }
 ```
 
-See `examples/release-watch.json` for generic overrides covering prefixed upstream tags, opt-in prerelease tags, manual/no-fetch vendors, and live-only channels.
+See `examples/release-watch.json` for generic overrides covering prefixed upstream tags, opt-in prerelease tags, `.deb` control metadata, vendor URL/JSON regex checks, and live-only channels.
 
 Overlay detection precedence:
 

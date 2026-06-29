@@ -25,10 +25,24 @@
         "version_regex": "^v(?P<version>\\d+(?:\\.\\d+)+)-alpha1$"
       }
     },
-    "media-video/example-nofetch-vendor": {
-      "status": "manual_no_fetch",
-      "note": "Example: proprietary/no-fetch vendor with no stable machine-readable API.",
-      "source": { "type": "manual", "url": "https://example.com/downloads" }
+    "app-misc/example-deb-vendor": {
+      "status": "auto",
+      "note": "Example: read package metadata from an official downloadable .deb and normalize Debian revisions when the Gentoo package uses dots.",
+      "source": {
+        "type": "deb-control",
+        "url": "https://example.com/downloads/example-linux.deb",
+        "package": "example",
+        "normalize": "debian-hyphen-to-gentoo-dot"
+      }
+    },
+    "media-video/example-url-regex-vendor": {
+      "status": "auto",
+      "note": "Example: proprietary/no-fetch vendor with a machine-readable download page or JSON endpoint.",
+      "source": {
+        "type": "url-regex",
+        "url": "https://example.com/downloads.json",
+        "version_regex": "\"linux\"\\s*:\\s*\\{\\s*\"version\"\\s*:\\s*\"(?P<version>\\d+(?:\\.\\d+)+)\""
+      }
     },
     "www-client/example-nightly-bin": {
       "status": "live_only",
