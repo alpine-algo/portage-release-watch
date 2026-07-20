@@ -15,6 +15,7 @@ def test_load_config_merges_overlay_and_cli_recursively(tmp_path):
     cli = tmp_path / "release-watch.json"
     cli.write_text(json.dumps({"dynamic": {"enabled": True}}))
     config, sources = load_config(cli, overlay)
+    assert config["schema_version"] == 2
     assert config["dynamic"]["enabled"] is True
     assert config["packages"]["cat/pkg"]["status"] == "manual"
     assert sources[-1] == str(cli)
