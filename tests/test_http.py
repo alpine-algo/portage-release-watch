@@ -83,6 +83,7 @@ def test_payload_kinds_force_revalidate_then_use_fresh_cache(
     assert request.get_header("If-modified-since") == "Mon, 20 Jul 2026 12:00:00 GMT"
     cache = json.loads(cache_path.read_text())
     assert "stale_error" not in cache
+    assert cache["payload_kind"] == method.removeprefix("get_")
     if method == "get_bytes":
         assert base64.b64decode(cache["body_base64"]) == expected
         assert "body" not in cache
@@ -120,6 +121,7 @@ def test_304_recovery_clears_historical_stale_marker(tmp_path, monkeypatch):
     assert result.stale_error is None
     cache = json.loads(cache_path.read_text())
     assert cache["fetched_at"] > 0
+    assert cache["payload_kind"] == "json"
     assert "stale_error" not in cache
 
     def unexpected_urlopen(*args, **kwargs):
@@ -170,6 +172,48 @@ def test_current_failure_uses_stale_cache_without_persisting_error(
     persisted = cache_path.read_text()
     assert "secret-token" not in persisted
     assert "stale_error" not in json.loads(persisted)
+
+
+def test_token_is_not_sent_to_deceptive_github_hostname(tmp_path, monkeypatch):
+    client = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24, token="secret-token")
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return _Response(b"release-2.0")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    result = client.get_text("https://api.github.com.attacker.invalid/releases", force=True)
+
+    assert result.body == "release-2.0"
+    assert requests[0].get_header("Authorization") is None
+
+
+def test_payload_kind_marker_prevents_cross_kind_cache_reuse(tmp_path, monkeypatch):
+    client = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    url = "https://example.invalid/shared"
+    responses = iter([
+        _Response(b'{"version": 1}'),
+        _Response(b'{"version": 2}'),
+        _Response(b"plain text"),
+    ])
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return next(responses)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    text = client.get_text(url, force=True)
+    parsed = client.get_json(url)
+    text_again = client.get_text(url)
+
+    assert text.body == '{"version": 1}'
+    assert parsed.body == {"version": 2}
+    assert text_again.body == "plain text"
+    assert len(requests) == 3
+    assert requests[1].get_header("If-none-match") is None
+    assert requests[2].get_header("If-none-match") is None
 
 
 def test_unusable_cache_does_not_mask_fetch_failure(tmp_path, monkeypatch):

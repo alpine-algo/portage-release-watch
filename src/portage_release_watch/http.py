@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,9 +77,11 @@ class HttpClient:
             return FetchResult(cached_body)
 
         headers = {"User-Agent": USER_AGENT, "Accept": accept}
-        if self.token and "api.github.com" in url:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if cached:
+        if self.token:
+            target = urllib.parse.urlsplit(url)
+            if target.scheme == "https" and target.hostname == "api.github.com":
+                headers["Authorization"] = f"Bearer {self.token}"
+        if cached and usable:
             if isinstance(cached.get("etag"), str):
                 headers["If-None-Match"] = cached["etag"]
             if isinstance(cached.get("last_modified"), str):
@@ -92,6 +95,7 @@ class HttpClient:
                     "url": url,
                     "status": resp.status,
                     "fetched_at": now,
+                    "payload_kind": payload_kind,
                     "etag": resp.headers.get("ETag"),
                     "last_modified": resp.headers.get("Last-Modified"),
                     "rate_remaining": resp.headers.get("X-RateLimit-Remaining"),
@@ -106,6 +110,7 @@ class HttpClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 304 and usable and cached:
                 cached["fetched_at"] = now
+                cached["payload_kind"] = payload_kind
                 cached.pop("stale_error", None)
                 atomic_write_json(path, cached)
                 return FetchResult(cached_body)
@@ -115,6 +120,9 @@ class HttpClient:
 
     def _cached_body(self, cached: dict[str, Any] | None, payload_kind: str) -> tuple[bool, Any]:
         if not cached:
+            return False, None
+        cached_kind = cached.get("payload_kind")
+        if cached_kind is not None and cached_kind != payload_kind:
             return False, None
         if payload_kind == "json":
             return ("body" in cached), cached.get("body")
