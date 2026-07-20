@@ -27,8 +27,8 @@ def newest_infos(infos: list[PackageInfo]) -> PackageInfo:
             continue
         if info.pv is None:
             continue
-        cmp = compare_versions(info.pv, best.pv)
-        if cmp > 0 or (cmp == 0 and (info.pr or "r0") > (best.pr or "r0")):
+        cmp = compare_versions(info.pvr or info.pv, best.pvr or best.pv)
+        if cmp > 0:
             best = info
     return best
 
