@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .config import DEFAULT_CACHE_DIR, DEFAULT_STATE_DIR, SYSTEM_CACHE_DIR, SYSTEM_STATE_DIR, detect_default_overlay, load_config
+from . import __version__
+
+from .config import DEFAULT_CACHE_DIR, DEFAULT_STATE_DIR, SYSTEM_CACHE_DIR, SYSTEM_STATE_DIR, detect_default_overlay, load_config, load_github_token
 from .http import HttpClient, atomic_write_json, atomic_write_text
 from .install import install_system
 from .models import WatchError
@@ -44,14 +45,11 @@ def command_scan(args: argparse.Namespace) -> int:
 
 
 def command_check(args: argparse.Namespace) -> int:
+    if args.package and args.notify:
+        raise WatchError("--package cannot be combined with --notify; scoped checks are not persisted")
+
     config, sources = load_config(args.config, args.overlay)
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("PORTAGE_RELEASE_WATCH_GITHUB_TOKEN")
-    token_file = config.get("github_token_file")
-    if not token and token_file:
-        try:
-            token = Path(token_file).read_text().strip()
-        except Exception:
-            token = None
+    token = load_github_token(config)
     http = HttpClient(args.cache_dir / "http", args.timeout_seconds, args.max_age_hours, token)
     infos = scan_overlay(args.overlay)
     selected = sorted(infos)
@@ -62,7 +60,8 @@ def command_check(args: argparse.Namespace) -> int:
     rows = [evaluate_package(infos[cp], resolve_rule(config, infos[cp], args.overlay), http, args.refresh) for cp in selected]
     report = build_report(rows, sources, args.overlay)
     notice = notice_text(report)
-    if not args.no_write:
+    persist = not args.no_write and args.package is None
+    if persist:
         atomic_write_json(args.state_dir / "latest-report.json", report, mode=0o644)
         atomic_write_text(args.state_dir / "latest-notice.txt", notice, mode=0o644)
         hist = args.state_dir / "history.ndjson"
@@ -70,7 +69,7 @@ def command_check(args: argparse.Namespace) -> int:
         with hist.open("a") as f:
             f.write(json.dumps({"generated_at": report["generated_at"], "summary": report["summary"]}, sort_keys=True) + "\n")
     changed = False
-    if args.notify and not args.no_write:
+    if args.notify and persist:
         hooks_dir = Path(config.get("notify_hooks_dir", args.state_dir / "notify.d"))
         changed = maybe_notify(report, notice, args.state_dir, config.get("notify_repeat_hours", 168), True, hooks_dir)
     if args.json:
@@ -118,7 +117,7 @@ def command_explain(args: argparse.Namespace) -> int:
     payload = {"package": asdict(info), "mapping": rule}
     report_path = report_path_for_read(args)
     if report_path.exists():
-        report = json.loads(report_path.read_text())
+        report = load_latest_report(args)
         payload["report_path"] = str(report_path)
         payload["latest_report_row"] = next((r for r in report.get("packages", []) if r.get("cp") == args.package), None)
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -126,67 +125,74 @@ def command_explain(args: argparse.Namespace) -> int:
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable text")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Check Gentoo Portage local overlay ebuilds for newer upstream releases")
-    parser.add_argument("--overlay", type=Path, default=None)
-    parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
-    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    parser = argparse.ArgumentParser(
+        description="Check Gentoo Portage local overlay ebuilds for newer upstream releases",
+        epilog=(
+            "Exit codes: 0 success; 1 expected operational failure; "
+            "2 invalid command usage or check --fail-on-updates found updates."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}", help="Show the package version and exit")
+    parser.add_argument("--overlay", type=Path, default=None, metavar="PATH", help="Portage overlay for scan, check, or explain; autodetected when omitted")
+    parser.add_argument("--config", type=Path, default=None, metavar="PATH", help="JSON configuration override for overlay-consuming commands")
+    parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR, metavar="PATH", help="Directory for canonical reports and notification state")
+    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, metavar="PATH", help="Directory for cached provider responses")
     parser.add_argument("--system", action="store_true", help="Read/write canonical root state under /var/lib and /var/cache")
-    parser.add_argument("--timeout-seconds", type=int, default=20)
-    parser.add_argument("--max-age-hours", type=float, default=24)
-    sub = parser.add_subparsers(dest="command")
+    parser.add_argument("--timeout-seconds", type=int, default=20, metavar="SECONDS", help="HTTP request timeout in seconds")
+    parser.add_argument("--max-age-hours", type=float, default=24, metavar="HOURS", help="Maximum age of a fresh provider cache entry")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    p_scan = sub.add_parser("scan", help="Scan local overlay and mapping without network")
+    p_scan = sub.add_parser("scan", help="Scan local overlay and mapping without network", description="Scan local overlay and mapping without network.")
     _add_json(p_scan)
     p_scan.set_defaults(func=command_scan)
 
-    p_check = sub.add_parser("check", help="Check upstream sources and write report")
-    p_check.add_argument("--package")
+    p_check = sub.add_parser("check", help="Check upstream sources; full checks write the canonical report", description="Check upstream sources; full checks write the canonical report.")
+    p_check.add_argument("--package", metavar="CP", help="Check one category/package and do not persist canonical state")
     _add_json(p_check)
-    p_check.add_argument("--quiet", action="store_true")
-    p_check.add_argument("--notify", action="store_true")
-    p_check.add_argument("--refresh", action="store_true")
-    p_check.add_argument("--no-write", action="store_true")
-    p_check.add_argument("--fail-on-updates", action="store_true")
+    p_check.add_argument("--quiet", action="store_true", help="Suppress an unchanged human-readable report")
+    p_check.add_argument("--notify", action="store_true", help="Notify after a persisted full check; incompatible with --package")
+    p_check.add_argument("--refresh", action="store_true", help="Refresh provider responses instead of using fresh cache entries")
+    p_check.add_argument("--no-write", action="store_true", help="Print the report without writing canonical state or notifying")
+    p_check.add_argument("--fail-on-updates", action="store_true", help="Exit 2 when the report contains available updates")
     p_check.set_defaults(func=command_check)
 
-    p_list = sub.add_parser("list", help="Show latest cached report")
+    p_list = sub.add_parser("list", help="Show latest cached report", description="Show the latest cached report without overlay or network access.")
     _add_json(p_list)
     p_list.set_defaults(func=command_list)
 
-    p_status = sub.add_parser("status", help="Alias for list; default when no command is given")
+    p_status = sub.add_parser("status", help="Alias for list; default when no command is given", description="Show the latest cached report; this is the default command.")
     _add_json(p_status)
     p_status.set_defaults(func=command_list)
 
-    p_details = sub.add_parser("details", help="Show full cached report details without network")
+    p_details = sub.add_parser("details", help="Show full cached report details without network", description="Show full cached report details without overlay or network access.")
     _add_json(p_details)
     p_details.set_defaults(func=command_details)
 
-    p_live = sub.add_parser("live", help="Show 9999/live divergence from latest cached report")
+    p_live = sub.add_parser("live", help="Show 9999/live divergence from latest cached report", description="Show 9999/live divergence from the latest cached report.")
     _add_json(p_live)
     p_live.set_defaults(func=command_live)
 
-    p_explain = sub.add_parser("explain", help="Explain one package mapping and latest result")
-    p_explain.add_argument("package")
+    p_explain = sub.add_parser("explain", help="Explain one package mapping and latest result", description="Explain one package mapping and its latest cached result.")
+    p_explain.add_argument("package", metavar="CP", help="Category/package to explain")
     p_explain.set_defaults(func=command_explain)
 
-    p_install = sub.add_parser("install-system", help="Install system wrappers and optional cron/postsync hooks")
-    p_install.add_argument("--overlay", dest="install_overlay", type=Path, default=None)
-    p_install.add_argument("--config", dest="install_config", type=Path, default=Path("/etc/portage/release-watch.json"))
-    p_install.add_argument("--prefix", type=Path, default=Path("/usr/local"))
-    p_install.add_argument("--state-dir", dest="install_state_dir", type=Path, default=Path("/var/lib/portage-release-watch"))
-    p_install.add_argument("--cache-dir", dest="install_cache_dir", type=Path, default=Path("/var/cache/portage-release-watch"))
-    p_install.add_argument("--notify-hooks-dir", type=Path, default=Path("/etc/portage/release-watch.notify.d"))
-    p_install.add_argument("--scheduler", choices=("cron", "none"), default="none")
-    p_install.add_argument("--postsync", dest="postsync", action="store_true", default=False)
-    p_install.add_argument("--no-postsync", dest="postsync", action="store_false")
-    p_install.add_argument("--alias-prw", dest="alias_prw", action="store_true", default=True)
-    p_install.add_argument("--no-alias-prw", dest="alias_prw", action="store_false")
-    p_install.add_argument("--dry-run", action="store_true")
+    p_install = sub.add_parser("install-system", help="Install system wrappers and optional cron/postsync hooks", description="Install system wrappers and optional cron/postsync hooks.")
+    p_install.add_argument("--overlay", dest="install_overlay", type=Path, default=None, metavar="PATH", help="Portage overlay embedded in generated runners; autodetected when omitted")
+    p_install.add_argument("--config", dest="install_config", type=Path, default=None, metavar="PATH", help="Configuration path embedded in generated runners")
+    p_install.add_argument("--prefix", type=Path, default=Path("/usr/local"), metavar="PATH", help="Installation prefix for command wrappers")
+    p_install.add_argument("--state-dir", dest="install_state_dir", type=Path, default=Path("/var/lib/portage-release-watch"), metavar="PATH", help="State directory embedded in generated runners")
+    p_install.add_argument("--cache-dir", dest="install_cache_dir", type=Path, default=Path("/var/cache/portage-release-watch"), metavar="PATH", help="Cache directory embedded in generated runners")
+    p_install.add_argument("--notify-hooks-dir", type=Path, default=Path("/etc/portage/release-watch.notify.d"), metavar="PATH", help="Directory for executable notification hooks")
+    p_install.add_argument("--scheduler", choices=("cron", "none"), default="none", help="Install a cron runner or no scheduler")
+    p_install.add_argument("--postsync", dest="postsync", action="store_true", default=False, help="Install the Portage postsync runner")
+    p_install.add_argument("--no-postsync", dest="postsync", action="store_false", help="Do not install the Portage postsync runner")
+    p_install.add_argument("--alias-prw", dest="alias_prw", action="store_true", default=True, help="Install the prw command alias")
+    p_install.add_argument("--no-alias-prw", dest="alias_prw", action="store_false", help="Do not install the prw command alias")
+    p_install.add_argument("--dry-run", action="store_true", help="Print the installation plan without writing files")
     p_install.set_defaults(func=install_system)
     return parser
 
@@ -195,8 +201,11 @@ def _resolve_common_args(args: argparse.Namespace) -> None:
     if args.command == "install-system":
         if args.install_overlay is None:
             args.install_overlay = detect_default_overlay(Path.cwd())
+        if args.install_config is None:
+            args.install_config = Path("/etc/portage/release-watch.json")
         return
-    args.overlay = (args.overlay.expanduser().resolve() if args.overlay is not None else detect_default_overlay(Path.cwd()))
+    if args.command in ("scan", "check", "explain"):
+        args.overlay = detect_default_overlay(Path.cwd(), args.overlay)
     if args.config is not None:
         args.config = args.config.expanduser().resolve()
     if args.system:

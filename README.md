@@ -93,16 +93,22 @@ portage-release-watch status [--json]
 portage-release-watch details [--json]
 portage-release-watch live [--json]
 portage-release-watch explain CP
+portage-release-watch install-system [OPTIONS]
+portage-release-watch --version
 prw ...
 ```
 
-No subcommand defaults to `status`, which reads the latest cached report and performs no network calls.
+With no subcommand, the CLI defaults to `status`. `status`, `list`, `details`, and `live` read the selected cached report without discovering an overlay or making a network request, so they work from any current directory.
+
+`check --package CP` prints an ephemeral package-scoped report. It does not replace the latest report or notice, append history, update notification state, invoke `logger`, or run notification hooks. Because partial results are never canonical notification state, `--package` cannot be combined with `--notify`.
+
+`scan`, `check`, and `explain` require a recognized Portage overlay. An invalid path selected by `--overlay` or `PORTAGE_RELEASE_WATCH_OVERLAY` is an operational error rather than an empty successful scan. Use top-level or subcommand `--help` for option descriptions.
 
 Exit codes:
 
 - `0`: success and no requested failure condition;
-- `1`: config, usage, overlay, install, or provider failure;
-- `2`: `check --fail-on-updates` found updates.
+- `1`: an expected operational failure such as an invalid overlay, config, cached report, token file, install input, or provider request;
+- `2`: invalid argparse command usage, or `check --fail-on-updates` found updates.
 
 ## How source discovery works
 
@@ -143,9 +149,11 @@ This answers how far the fixed ebuild diverged while a live ebuild exists withou
 Config merge order is deterministic. Later files override earlier keys recursively for dictionaries:
 
 1. built-in defaults;
-2. `/etc/portage/release-watch.json`, if readable;
-3. `<overlay>/.release-watch.json`, if readable;
+2. `/etc/portage/release-watch.json`, if present;
+3. `<overlay>/.release-watch.json`, if present;
 4. `--config PATH`, if supplied.
+
+Malformed or unreadable config files fail with a concise path-specific error. The schema remains version `2`; this milestone does not rewrite or migrate configuration.
 
 Built-in defaults:
 
@@ -161,12 +169,12 @@ Built-in defaults:
 
 See `examples/release-watch.json` for generic overrides covering prefixed upstream tags, opt-in prerelease tags, `.deb` control metadata, vendor URL/JSON regex checks, and live-only channels.
 
-Overlay detection precedence:
+Overlay detection for `scan`, `check`, and `explain` uses this precedence:
 
-1. `--overlay PATH`;
-2. `PORTAGE_RELEASE_WATCH_OVERLAY`;
+1. `--overlay PATH`, which must name a recognized overlay;
+2. `PORTAGE_RELEASE_WATCH_OVERLAY`, which must name a recognized overlay;
 3. first ancestor of the current directory containing `profiles/repo_name` or root-level `repo_name` and at least one `*/*/*.ebuild`;
-4. `/var/db/repos/local` when it exists;
+4. `/var/db/repos/local` when it is a recognized overlay;
 5. otherwise an error asking for `--overlay /path/to/overlay`.
 
 State/cache defaults:
@@ -199,6 +207,8 @@ Options:
 --dry-run
 ```
 
+`--config` is optional. When omitted, the current installer behavior uses `/etc/portage/release-watch.json`; an explicit path remains distinguishable at the CLI parse boundary.
+
 Daily cron uses `/etc/cron.daily/portage-release-watch` when `--scheduler cron` is requested. Sync-time visibility uses `/etc/portage/postsync.d/90-portage-release-watch` when `--postsync` is requested. The postsync hook uses a short timeout and the HTTP cache so a provider outage should not block normal sync workflows.
 
 Notification dedupe repeats only when the update/manual/warning signal changes or `notify_repeat_hours` elapses. Executable hooks in `notify_hooks_dir` receive the report path as argv 1 and these environment variables:
@@ -216,7 +226,7 @@ The default workload is small, and HTTP responses are cached with ETag/Last-Modi
 export PORTAGE_RELEASE_WATCH_GITHUB_TOKEN=...
 ```
 
-`GITHUB_TOKEN` is also honored. A config file may specify `github_token_file`, but public examples avoid machine-local token paths.
+`GITHUB_TOKEN` is also honored. A config file may specify `github_token_file`, but public examples avoid machine-local token paths. When neither environment token is set, a configured token file must exist, be readable UTF-8, and contain a non-empty token; otherwise the command exits `1` without printing token content.
 
 On HTTP or network errors, cached provider responses are reused when present and marked with `stale_error`. Without a cache entry, provider failures are reported as package warnings or command failures depending on where they occur.
 

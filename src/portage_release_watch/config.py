@@ -40,10 +40,31 @@ def _is_overlay(path: Path) -> bool:
     return ((path / "profiles/repo_name").is_file() or (path / "repo_name").is_file()) and _has_ebuilds(path)
 
 
-def detect_default_overlay(cwd: Path) -> Path:
+def _validate_selected_overlay(path: Path, source: str) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        raise WatchError(
+            f"overlay from {source} does not exist: {resolved}; choose an existing Portage overlay"
+        )
+    if not resolved.is_dir():
+        raise WatchError(
+            f"overlay from {source} is not a directory: {resolved}; choose a Portage overlay directory"
+        )
+    if not _is_overlay(resolved):
+        raise WatchError(
+            f"overlay from {source} is not recognized: {resolved}; "
+            "expected profiles/repo_name or repo_name and at least one ebuild"
+        )
+    return resolved
+
+
+def detect_default_overlay(cwd: Path, overlay_arg: Path | None = None) -> Path:
+    if overlay_arg is not None:
+        return _validate_selected_overlay(overlay_arg, "--overlay")
+
     env_overlay = os.environ.get("PORTAGE_RELEASE_WATCH_OVERLAY")
     if env_overlay:
-        return Path(env_overlay).expanduser().resolve()
+        return _validate_selected_overlay(Path(env_overlay), "PORTAGE_RELEASE_WATCH_OVERLAY")
 
     cur = cwd.expanduser().resolve()
     for candidate in (cur, *cur.parents):
@@ -51,7 +72,7 @@ def detect_default_overlay(cwd: Path) -> Path:
             return candidate
 
     local = Path("/var/db/repos/local")
-    if local.exists():
+    if _is_overlay(local):
         return local.resolve()
 
     raise WatchError("no overlay found; run from an overlay or pass --overlay /path/to/overlay")
@@ -69,7 +90,18 @@ def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text())
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise WatchError(f"cannot read config: {path} ({exc.strerror or 'filesystem error'})") from exc
+    except UnicodeError as exc:
+        raise WatchError(f"config is not valid UTF-8: {path}") from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise WatchError(
+            f"invalid config JSON: {path} (line {exc.lineno}, column {exc.colno})"
+        ) from exc
     if not isinstance(data, dict):
         raise WatchError(f"config must be a JSON object: {path}")
     return data
@@ -80,18 +112,40 @@ def load_config(config_arg: Path | None, overlay: Path) -> tuple[dict[str, Any],
     loaded: list[str] = []
 
     for path in (Path("/etc/portage/release-watch.json"), overlay / ".release-watch.json"):
-        if path.is_file() and os.access(path, os.R_OK):
+        if path.exists():
             config = _merge_dict(config, _read_json(path))
             loaded.append(str(path))
 
     if config_arg is not None:
         path = config_arg.expanduser()
-        if not path.is_file():
+        if not path.exists():
             raise WatchError(f"config not found: {path}")
         config = _merge_dict(config, _read_json(path))
         loaded.append(str(path))
 
     return config, loaded
+
+
+def load_github_token(config: dict[str, Any]) -> str | None:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("PORTAGE_RELEASE_WATCH_GITHUB_TOKEN")
+    if token:
+        return token
+
+    token_file = config.get("github_token_file")
+    if not token_file:
+        return None
+    path = Path(token_file)
+    try:
+        token = path.read_text().strip()
+    except OSError as exc:
+        raise WatchError(
+            f"cannot read GitHub token file: {path} ({exc.strerror or 'filesystem error'})"
+        ) from exc
+    except UnicodeError as exc:
+        raise WatchError(f"GitHub token file is not valid UTF-8: {path}") from exc
+    if not token:
+        raise WatchError(f"GitHub token file is empty: {path}")
+    return token
 
 
 def config_label(config_sources: list[str]) -> str:

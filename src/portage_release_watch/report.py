@@ -150,7 +150,23 @@ def load_latest_report(args: argparse.Namespace) -> dict[str, Any]:
     path = report_path_for_read(args)
     if not path.exists():
         raise WatchError(f"no report found: {path}; run check first")
-    return json.loads(path.read_text())
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise WatchError(
+            f"cannot read cached report: {path} ({exc.strerror or 'filesystem error'})"
+        ) from exc
+    except UnicodeError as exc:
+        raise WatchError(f"cached report is not valid UTF-8: {path}") from exc
+    try:
+        report = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise WatchError(
+            f"invalid cached report JSON: {path} (line {exc.lineno}, column {exc.colno})"
+        ) from exc
+    if not isinstance(report, dict):
+        raise WatchError(f"cached report must be a JSON object: {path}")
+    return report
 
 
 def details_text(report: dict[str, Any]) -> str:
