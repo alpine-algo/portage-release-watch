@@ -47,6 +47,7 @@ def _package_info(cp: str = "app-misc/example") -> PackageInfo:
 
 
 def test_stale_degradation_is_current_run_warning_without_status_change(tmp_path, monkeypatch):
+    install_fake_portage(monkeypatch)
     candidate = Candidate(
         raw="2.0",
         version="2.0",
@@ -157,6 +158,7 @@ def test_check_exit_precedence_after_report_output_and_persistence(
     cache = tmp_path / "cache"
     infos = {row["cp"]: _package_info(row["cp"]) for row in rows}
     rows_by_cp = {row["cp"]: row for row in rows}
+    monkeypatch.setattr(cli_module, "_resolve_common_args", lambda args: None)
     monkeypatch.setattr(cli_module, "load_config", lambda *args: ({"schema_version": 2}, []))
     monkeypatch.setattr(cli_module, "load_github_token", lambda config: None)
     monkeypatch.setattr(cli_module, "scan_overlay", lambda path: infos)
