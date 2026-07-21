@@ -204,8 +204,6 @@ def _resolve_common_args(args: argparse.Namespace) -> None:
     if args.command == "install-system":
         if args.install_overlay is None:
             args.install_overlay = detect_default_overlay(Path.cwd())
-        if args.install_config is None:
-            args.install_config = Path("/etc/portage/release-watch.json")
         return
     if args.command in ("scan", "check", "explain"):
         args.overlay = detect_default_overlay(Path.cwd(), args.overlay)

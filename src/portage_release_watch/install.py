@@ -30,18 +30,37 @@ def _module_wrapper() -> str:
     return "#!/bin/sh\nexec python3 -m portage_release_watch.cli \"$@\"\n"
 
 
-def _cron_content(overlay: Path, config: Path, state_dir: Path, cache_dir: Path) -> str:
-    return (
-        "#!/bin/sh\n"
-        f"exec /usr/local/bin/portage-release-watch --system --overlay {_shell_quote(overlay)} --config {_shell_quote(config)} --state-dir {_shell_quote(state_dir)} --cache-dir {_shell_quote(cache_dir)} --timeout-seconds 30 --max-age-hours 24 check --quiet --notify\n"
+def _runner_content(
+    executable: Path,
+    overlay: Path,
+    config: Path | None,
+    state_dir: Path,
+    cache_dir: Path,
+    timeout_seconds: int,
+) -> str:
+    command = [
+        _shell_quote(executable),
+        "--overlay",
+        _shell_quote(overlay),
+    ]
+    if config is not None:
+        command.extend(("--config", _shell_quote(config)))
+    command.extend(
+        (
+            "--state-dir",
+            _shell_quote(state_dir),
+            "--cache-dir",
+            _shell_quote(cache_dir),
+            "--timeout-seconds",
+            str(timeout_seconds),
+            "--max-age-hours",
+            "24",
+            "check",
+            "--quiet",
+            "--notify",
+        )
     )
-
-
-def _postsync_content(overlay: Path, config: Path, state_dir: Path, cache_dir: Path) -> str:
-    return (
-        "#!/bin/sh\n"
-        f"exec /usr/local/bin/portage-release-watch --system --overlay {_shell_quote(overlay)} --config {_shell_quote(config)} --state-dir {_shell_quote(state_dir)} --cache-dir {_shell_quote(cache_dir)} --timeout-seconds 8 --max-age-hours 24 check --quiet --notify\n"
-    )
+    return "#!/bin/sh\nexec " + " ".join(command) + "\n"
 
 
 def _ensure_same_or_missing(path: Path, content: str) -> None:
@@ -65,7 +84,7 @@ def _write_file(path: Path, content: str, mode: int) -> None:
 
 def install_system(args) -> int:
     overlay = args.install_overlay.resolve()
-    config = args.install_config.resolve()
+    config = args.install_config.resolve() if args.install_config is not None else None
     prefix = args.prefix.resolve()
     state_dir = args.install_state_dir.resolve()
     cache_dir = args.install_cache_dir.resolve()
@@ -75,18 +94,43 @@ def install_system(args) -> int:
         raise WatchError("install-system requires root; re-run with sudo or use --dry-run")
     if args.scheduler == "cron" and not Path("/etc/cron.daily").is_dir():
         raise WatchError("/etc/cron.daily does not exist; install a cron implementation or use --scheduler none")
+    if config is not None:
+        try:
+            with config.open("rb"):
+                pass
+        except OSError as exc:
+            raise WatchError(
+                f"cannot read config: {config} ({exc.strerror or 'filesystem error'})"
+            ) from exc
 
     dirs = [state_dir, cache_dir, cache_dir / "http", notify_hooks_dir]
     if args.postsync:
         dirs.append(Path("/etc/portage/postsync.d"))
 
-    files: list[PlannedFile] = [PlannedFile(prefix / "bin/portage-release-watch", _module_wrapper(), 0o755)]
+    executable = prefix / "bin/portage-release-watch"
+    files: list[PlannedFile] = [PlannedFile(executable, _module_wrapper(), 0o755)]
     if args.alias_prw:
         files.append(PlannedFile(prefix / "bin/prw", _module_wrapper(), 0o755))
     if args.scheduler == "cron":
-        files.append(PlannedFile(Path("/etc/cron.daily/portage-release-watch"), _cron_content(overlay, config, state_dir, cache_dir), 0o755))
+        files.append(
+            PlannedFile(
+                Path("/etc/cron.daily/portage-release-watch"),
+                _runner_content(
+                    executable, overlay, config, state_dir, cache_dir, 30
+                ),
+                0o755,
+            )
+        )
     if args.postsync:
-        files.append(PlannedFile(Path("/etc/portage/postsync.d/90-portage-release-watch"), _postsync_content(overlay, config, state_dir, cache_dir), 0o755))
+        files.append(
+            PlannedFile(
+                Path("/etc/portage/postsync.d/90-portage-release-watch"),
+                _runner_content(
+                    executable, overlay, config, state_dir, cache_dir, 8
+                ),
+                0o755,
+            )
+        )
 
     print("Planned portage-release-watch system install:")
     for directory in dirs:
