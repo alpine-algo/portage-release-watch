@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import base64
 import io
 import json
 import re
 import tarfile
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .config import USER_AGENT
-from .http import HttpClient, atomic_write_json
+from .http import FetchResult, HttpClient
 from .models import Candidate, PackageInfo, WatchError
 from .overlay import read_metadata_remote_ids, read_selected_ebuild
 from .versioning import candidate_allowed, extract_version
@@ -155,14 +150,17 @@ def resolve_rule(config: dict[str, Any], info: PackageInfo, overlay: Path) -> di
     return infer_rule(info, overlay)
 
 
-def github_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+def github_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
     repo = source["repo"]
     mode = source.get("mode", "releases")
     source_id = f"github:{repo}"
     candidates: list[Candidate] = []
+    stale_error: str | None = None
     if mode in ("releases", "release", "max_release", "auto", "releases_then_tags"):
         url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
-        data = http.get_json(url, force=force)
+        result = http.get_json(url, force=force)
+        data = result.body
+        stale_error = result.stale_error
         if not isinstance(data, list):
             raise WatchError(f"{source_id}: unexpected releases response")
         for rel in data:
@@ -184,10 +182,13 @@ def github_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> 
                 asset_status = "matched"
             candidates.append(Candidate(raw, version, rel.get("html_url") or f"https://github.com/{repo}/releases/tag/{urllib.parse.quote(raw)}", source_id, rel.get("published_at"), asset_status))
     if mode in ("auto", "releases_then_tags") and candidates:
-        return candidates
+        return FetchResult(candidates, stale_error)
     if mode in ("tags", "tag", "max_tag", "auto", "releases_then_tags"):
         url = f"https://api.github.com/repos/{repo}/tags?per_page=100"
-        data = http.get_json(url, force=force)
+        result = http.get_json(url, force=force)
+        data = result.body
+        if result.stale_error:
+            stale_error = "; ".join(part for part in (stale_error, result.stale_error) if part)
         if not isinstance(data, list):
             raise WatchError(f"{source_id}: unexpected tags response")
         for tag in data:
@@ -198,16 +199,17 @@ def github_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> 
             candidates.append(Candidate(raw, version, f"https://github.com/{repo}/releases/tag/{urllib.parse.quote(raw)}", source_id))
     elif mode not in ("releases", "release", "max_release", "tags", "tag", "max_tag", "auto", "releases_then_tags"):
         raise WatchError(f"{source_id}: unknown GitHub mode {mode}")
-    return candidates
+    return FetchResult(candidates, stale_error)
 
 
-def gitlab_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+def gitlab_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
     host = source.get("host", "gitlab.com")
     project = source["project"]
     encoded = urllib.parse.quote(project, safe="")
     source_id = f"gitlab:{host}/{project}"
     url = f"https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=100&order_by=version&sort=desc"
-    data = http.get_json(url, force=force)
+    result = http.get_json(url, force=force)
+    data = result.body
     if not isinstance(data, list):
         raise WatchError(f"{source_id}: unexpected tags response")
     candidates: list[Candidate] = []
@@ -218,14 +220,15 @@ def gitlab_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> 
             continue
         rel = tag.get("release") or {}
         candidates.append(Candidate(raw, version, f"https://{host}/{project}/-/tags/{urllib.parse.quote(raw)}", source_id, rel.get("released_at")))
-    return candidates
+    return FetchResult(candidates, result.stale_error)
 
 
-def pypi_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+def pypi_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
     project = source["project"]
     source_id = f"pypi:{project}"
     url = f"https://pypi.org/pypi/{urllib.parse.quote(project)}/json"
-    data = http.get_json(url, force=force)
+    result = http.get_json(url, force=force)
+    data = result.body
     releases = data.get("releases", {}) if isinstance(data, dict) else {}
     candidates: list[Candidate] = []
     for raw, files in releases.items():
@@ -240,77 +243,21 @@ def pypi_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> li
                 released_at = f["upload_time_iso_8601"]
                 break
         candidates.append(Candidate(raw, version, f"https://pypi.org/project/{project}/{raw}/", source_id, released_at))
-    return candidates
+    return FetchResult(candidates, result.stale_error)
 
 
-def url_regex_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+def url_regex_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
     url = source["url"]
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html, text/plain, */*"})
-    with urllib.request.urlopen(req, timeout=http.timeout) as resp:
-        text = resp.read().decode("utf-8", "replace")
+    result = http.get_text(url, force=force)
     candidates = []
-    for m in re.finditer(source["version_regex"], text):
+    for m in re.finditer(source["version_regex"], result.body):
         raw = m.group("version") if "version" in m.groupdict() else (m.group(1) if m.groups() else m.group(0))
         version = extract_version(raw, {k: v for k, v in source.items() if k != "version_regex"}) or raw
         if candidate_allowed(raw, version, source):
             candidates.append(Candidate(raw, version, url, f"url:{url}"))
-    return candidates
+    return FetchResult(candidates, result.stale_error)
 
 
-def _cached_url_bytes(url: str, http: HttpClient, force: bool, accept: str) -> bytes:
-    path = http._cache_path(url)
-    cached = http._read_cache(path)
-    now = time.time()
-
-    def cached_body() -> bytes | None:
-        if not cached:
-            return None
-        if isinstance(cached.get("body_base64"), str):
-            return base64.b64decode(cached["body_base64"])
-        if isinstance(cached.get("body"), str):
-            return cached["body"].encode("latin1")
-        return None
-
-    body = cached_body()
-    if body is not None and not force and now - cached.get("fetched_at", 0) < http.max_age:
-        return body
-
-    headers = {"User-Agent": USER_AGENT, "Accept": accept}
-    if cached:
-        if cached.get("etag"):
-            headers["If-None-Match"] = cached["etag"]
-        if cached.get("last_modified"):
-            headers["If-Modified-Since"] = cached["last_modified"]
-
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=http.timeout) as resp:
-            body = resp.read()
-            atomic_write_json(path, {
-                "url": url,
-                "status": resp.status,
-                "fetched_at": now,
-                "etag": resp.headers.get("ETag"),
-                "last_modified": resp.headers.get("Last-Modified"),
-                "body_base64": base64.b64encode(body).decode("ascii"),
-            })
-            return body
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304 and body is not None and cached:
-            cached["fetched_at"] = now
-            atomic_write_json(path, cached)
-            return body
-        if body is not None and cached:
-            cached["stale_error"] = f"HTTP {exc.code} {exc.reason}"
-            atomic_write_json(path, cached)
-            return body
-        raise WatchError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
-    except Exception as exc:
-        if body is not None and cached:
-            cached["stale_error"] = repr(exc)
-            atomic_write_json(path, cached)
-            return body
-        raise WatchError(f"{url}: {exc}") from exc
 
 
 def _debian_control_fields(text: str) -> dict[str, str]:
@@ -363,17 +310,21 @@ def _control_fields_from_deb(deb: bytes, source_id: str) -> dict[str, str]:
     raise WatchError(f"{source_id}: missing control archive")
 
 
-def deb_control_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> list[Candidate]:
+def deb_control_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
     url = source["url"]
     source_id = f"deb-control:{url}"
-    body = _cached_url_bytes(url, http, force, "application/vnd.debian.binary-package, application/octet-stream, */*")
-    fields = _control_fields_from_deb(body, source_id)
+    result = http.get_bytes(
+        url,
+        force=force,
+        accept="application/vnd.debian.binary-package, application/octet-stream, */*",
+    )
+    fields = _control_fields_from_deb(result.body, source_id)
     package = source.get("package")
     if package and fields.get("package") != package:
-        return []
+        return FetchResult([], result.stale_error)
     raw = fields.get(source.get("field", "Version").lower())
     if not raw:
-        return []
+        return FetchResult([], result.stale_error)
     normalize = source.get("normalize")
     if normalize is None:
         version = raw
@@ -382,11 +333,15 @@ def deb_control_candidates(source: dict[str, Any], http: HttpClient, force: bool
     else:
         raise WatchError(f"{source_id}: unsupported normalize {normalize!r}")
     if not candidate_allowed(raw, version, source):
-        return []
-    return [Candidate(raw, version, url, source_id)]
+        return FetchResult([], result.stale_error)
+    return FetchResult([Candidate(raw, version, url, source_id)], result.stale_error)
 
 
-def fetch_candidates(source: dict[str, Any], http: HttpClient, force: bool = False) -> list[Candidate]:
+def fetch_candidates(
+    source: dict[str, Any],
+    http: HttpClient,
+    force: bool = False,
+) -> FetchResult[list[Candidate]]:
     typ = source.get("type")
     if typ == "github":
         return github_candidates(source, http, force)
@@ -399,5 +354,5 @@ def fetch_candidates(source: dict[str, Any], http: HttpClient, force: bool = Fal
     if typ == "url-regex":
         return url_regex_candidates(source, http, force)
     if typ in ("manual", "live"):
-        return []
+        return FetchResult([])
     raise WatchError(f"unknown source type {typ!r}")

@@ -106,9 +106,9 @@ With no subcommand, the CLI defaults to `status`. `status`, `list`, `details`, a
 
 Exit codes:
 
-- `0`: success and no requested failure condition;
-- `1`: an expected operational failure such as an invalid overlay, config, cached report, token file, install input, or provider request;
-- `2`: invalid argparse command usage, or `check --fail-on-updates` found updates.
+- `0`: success, including a check that only used visible stale-cache fallback;
+- `1`: an expected operational failure such as an invalid overlay, config, cached report, token file, install input, or any package row with provider status `failed`; this takes precedence over updates;
+- `2`: invalid argparse command usage, or `check --fail-on-updates` found updates and no package row failed.
 
 ## How source discovery works
 
@@ -220,7 +220,7 @@ PORTAGE_RELEASE_WATCH_STATUS
 
 ## GitHub rate limits and tokens
 
-The default workload is small, and HTTP responses are cached with ETag/Last-Modified support. For larger overlays or frequent refreshes, set a token:
+The default workload is small. JSON, text/HTML, and Debian binary provider responses share the HTTP cache's maximum age and ETag/Last-Modified revalidation policy. A fresh cache hit avoids the network; `check --refresh` attempts a fetch or revalidation for every provider type. For larger overlays or frequent refreshes, set a token:
 
 ```sh
 export PORTAGE_RELEASE_WATCH_GITHUB_TOKEN=...
@@ -228,7 +228,7 @@ export PORTAGE_RELEASE_WATCH_GITHUB_TOKEN=...
 
 `GITHUB_TOKEN` is also honored. A config file may specify `github_token_file`, but public examples avoid machine-local token paths. When neither environment token is set, a configured token file must exist, be readable UTF-8, and contain a non-empty token; otherwise the command exits `1` without printing token content.
 
-On HTTP or network errors, cached provider responses are reused when present and marked with `stale_error`. Without a cache entry, provider failures are reported as package warnings or command failures depending on where they occur.
+If a fetch or revalidation fails and a usable cached body exists, the package keeps its normal primary status and the current report adds a sanitized `stale_error` warning; a fresh hit, successful fetch, or `304` has no stale marker. Without usable cached data the package row is `failed`; `check` still emits and persists the full report before exiting `1`. Authentication tokens are not written to cache entries or failure text.
 
 ## Compatibility
 

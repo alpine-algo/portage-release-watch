@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-import hashlib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from .config import USER_AGENT
 from .models import WatchError
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class FetchResult(Generic[T]):
+    body: T
+    stale_error: str | None = None
 
 
 class HttpClient:
@@ -32,55 +45,133 @@ class HttpClient:
         except Exception:
             return None
 
-    def get_json(self, url: str, *, force: bool = False) -> Any:
+    def get_json(self, url: str, *, force: bool = False) -> FetchResult[Any]:
+        return self._get(url, force=force, accept="application/json", payload_kind="json")
+
+    def get_text(
+        self,
+        url: str,
+        *,
+        force: bool = False,
+        accept: str = "text/html, text/plain, */*",
+    ) -> FetchResult[str]:
+        return self._get(url, force=force, accept=accept, payload_kind="text")
+
+    def get_bytes(
+        self,
+        url: str,
+        *,
+        force: bool = False,
+        accept: str = "application/octet-stream, */*",
+    ) -> FetchResult[bytes]:
+        return self._get(url, force=force, accept=accept, payload_kind="bytes")
+
+    def _get(self, url: str, *, force: bool, accept: str, payload_kind: str) -> FetchResult[Any]:
         path = self._cache_path(url)
         cached = self._read_cache(path)
+        usable, cached_body = self._cached_body(cached, payload_kind)
         now = time.time()
-        if cached and not force and now - cached.get("fetched_at", 0) < self.max_age:
-            return cached["body"]
+        fetched_at = cached.get("fetched_at", 0) if cached else 0
+        fresh = isinstance(fetched_at, (int, float)) and now - fetched_at < self.max_age
+        if usable and not force and fresh:
+            return FetchResult(cached_body)
 
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-        if self.token and "api.github.com" in url:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if cached:
-            if cached.get("etag"):
+        headers = {"User-Agent": USER_AGENT, "Accept": accept}
+        if self.token:
+            target = urllib.parse.urlsplit(url)
+            if target.scheme == "https" and target.hostname == "api.github.com":
+                headers["Authorization"] = f"Bearer {self.token}"
+        if cached and usable:
+            if isinstance(cached.get("etag"), str):
                 headers["If-None-Match"] = cached["etag"]
-            if cached.get("last_modified"):
+            if isinstance(cached.get("last_modified"), str):
                 headers["If-Modified-Since"] = cached["last_modified"]
 
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-                body = json.loads(raw)
+                body = self._decode_response(resp.read(), payload_kind)
                 payload = {
                     "url": url,
                     "status": resp.status,
                     "fetched_at": now,
+                    "payload_kind": payload_kind,
                     "etag": resp.headers.get("ETag"),
                     "last_modified": resp.headers.get("Last-Modified"),
                     "rate_remaining": resp.headers.get("X-RateLimit-Remaining"),
                     "rate_reset": resp.headers.get("X-RateLimit-Reset"),
-                    "body": body,
                 }
+                if payload_kind == "bytes":
+                    payload["body_base64"] = base64.b64encode(body).decode("ascii")
+                else:
+                    payload["body"] = body
                 atomic_write_json(path, payload)
-                return body
+                return FetchResult(body)
         except urllib.error.HTTPError as exc:
-            if exc.code == 304 and cached:
+            if exc.code == 304 and usable and cached:
                 cached["fetched_at"] = now
+                cached["payload_kind"] = payload_kind
+                cached.pop("stale_error", None)
                 atomic_write_json(path, cached)
-                return cached["body"]
-            if cached:
-                cached["stale_error"] = f"HTTP {exc.code} {exc.reason}"
-                atomic_write_json(path, cached)
-                return cached["body"]
-            raise WatchError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
+                return FetchResult(cached_body)
+            return self._fallback_or_raise(url, usable, cached_body, exc)
         except Exception as exc:
-            if cached:
-                cached["stale_error"] = repr(exc)
-                atomic_write_json(path, cached)
-                return cached["body"]
-            raise WatchError(f"{url}: {exc}") from exc
+            return self._fallback_or_raise(url, usable, cached_body, exc)
+
+    def _cached_body(self, cached: dict[str, Any] | None, payload_kind: str) -> tuple[bool, Any]:
+        if not cached:
+            return False, None
+        cached_kind = cached.get("payload_kind")
+        if cached_kind is not None and cached_kind != payload_kind:
+            return False, None
+        if payload_kind == "json":
+            return ("body" in cached), cached.get("body")
+        if payload_kind == "text":
+            body = cached.get("body")
+            return isinstance(body, str), body
+        encoded = cached.get("body_base64")
+        if isinstance(encoded, str):
+            try:
+                return True, base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                pass
+        body = cached.get("body")
+        if isinstance(body, str):
+            try:
+                return True, body.encode("latin1")
+            except UnicodeEncodeError:
+                pass
+        return False, None
+
+    @staticmethod
+    def _decode_response(raw: bytes, payload_kind: str) -> Any:
+        if payload_kind == "json":
+            return json.loads(raw.decode("utf-8", "replace"))
+        if payload_kind == "text":
+            return raw.decode("utf-8", "replace")
+        return raw
+
+    def _fallback_or_raise(
+        self,
+        url: str,
+        usable: bool,
+        cached_body: Any,
+        exc: Exception,
+    ) -> FetchResult[Any]:
+        detail = self._failure_detail(exc)
+        if usable:
+            return FetchResult(cached_body, detail)
+        raise WatchError(f"{self._sanitize(url)}: {detail}") from exc
+
+    def _failure_detail(self, exc: Exception) -> str:
+        if isinstance(exc, urllib.error.HTTPError):
+            detail = f"HTTP {exc.code} {exc.reason}"
+        else:
+            detail = f"{type(exc).__name__}: {exc}"
+        return self._sanitize(detail)
+
+    def _sanitize(self, text: str) -> str:
+        return text.replace(self.token, "[REDACTED]") if self.token else text
 
 
 def atomic_write_json(path: Path, data: Any, mode: int | None = None) -> None:

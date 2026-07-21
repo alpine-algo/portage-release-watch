@@ -8,7 +8,7 @@ import tarfile
 from portage_release_watch.models import PackageInfo
 from portage_release_watch.overlay import scan_overlay
 from portage_release_watch.sources import fetch_candidates, resolve_rule
-from portage_release_watch.http import HttpClient
+from portage_release_watch.http import FetchResult, HttpClient
 
 
 def _ar_member(name: str, data: bytes) -> bytes:
@@ -85,7 +85,7 @@ def test_inferred_github_regex_rejects_package_suffix_tags(tmp_path):
         '{"fetched_at":4102444800,"body":[{"name":"0.6.9-1"},{"name":"0.8.4"},{"name":"v0.8.4"}]}\n'
     )
 
-    candidates = fetch_candidates(rule["source"], http)
+    candidates = fetch_candidates(rule["source"], http).body
 
     assert [c.raw for c in candidates] == ["0.8.4", "v0.8.4"]
     assert [c.version for c in candidates] == ["0.8.4", "0.8.4"]
@@ -100,10 +100,10 @@ def test_prerelease_tags_filtered_by_default(tmp_path, monkeypatch):
     path = http._cache_path(url)
     path.write_text('{"fetched_at":4102444800,"body":[{"name":"v1.2.0-beta1"},{"name":"v1.1.0"}]}\n')
     source = {"type": "github", "repo": "owner/repo", "mode": "tags", "version_regex": "^v?(?P<version>\\d+(?:\\.\\d+)+(?:[._-]?\\w+)*)$"}
-    candidates = fetch_candidates(source, http)
+    candidates = fetch_candidates(source, http).body
     assert [c.raw for c in candidates] == ["v1.1.0"]
     source["include_prereleases"] = True
-    candidates = fetch_candidates(source, http)
+    candidates = fetch_candidates(source, http).body
     assert [c.raw for c in candidates] == ["v1.2.0-beta1", "v1.1.0"]
 
 
@@ -117,7 +117,7 @@ def test_deb_control_candidates_normalize_debian_version(tmp_path):
         "url": url,
         "package": "parsec",
         "normalize": "debian-hyphen-to-gentoo-dot",
-    }, http)
+    }, http).body
 
     assert len(candidates) == 1
     assert candidates[0].raw == "150-97c"
@@ -136,6 +136,26 @@ def test_deb_control_candidates_reject_package_mismatch(tmp_path):
         "url": url,
         "package": "parsec",
         "normalize": "debian-hyphen-to-gentoo-dot",
-    }, http)
+    }, http).body
 
     assert candidates == []
+
+
+def test_url_regex_uses_http_cache_contract(tmp_path, monkeypatch):
+    http = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    calls = []
+
+    def get_text(url, *, force=False, accept="text/html, text/plain, */*"):
+        calls.append((url, force, accept))
+        return FetchResult("release-2.4.0", "TimeoutError: upstream unavailable")
+
+    monkeypatch.setattr(http, "get_text", get_text)
+    result = fetch_candidates({
+        "type": "url-regex",
+        "url": "https://example.invalid/releases",
+        "version_regex": r"release-(?P<version>\d+\.\d+\.\d+)",
+    }, http, force=True)
+
+    assert calls == [("https://example.invalid/releases", True, "text/html, text/plain, */*")]
+    assert [candidate.version for candidate in result.body] == ["2.4.0"]
+    assert result.stale_error == "TimeoutError: upstream unavailable"

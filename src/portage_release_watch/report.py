@@ -40,8 +40,10 @@ def evaluate_package(info: PackageInfo, rule: dict[str, Any] | None, http: HttpC
         row.update({"status": "unmapped", "message": "Mapping has no source"})
         return row
     try:
-        candidates = fetch_candidates(source, http, force)
-        cand = best_candidate(candidates)
+        result = fetch_candidates(source, http, force)
+        if result.stale_error:
+            row["stale_error"] = result.stale_error
+        cand = best_candidate(result.body)
     except WatchError as exc:
         row.update({"status": "failed", "message": str(exc), "source": source})
         return row
@@ -88,7 +90,7 @@ def build_report(rows: list[dict[str, Any]], config_sources: list[str], overlay:
         "updates": [r for r in rows if r["status"] == "outdated"],
         "manual": [r for r in rows if r["status"] == "manual"],
         "live": [r for r in rows if r["status"] == "live" or r.get("live_divergence")],
-        "warnings": [r for r in rows if r["status"] in ("failed", "unmapped", "no_candidate", "ahead")],
+        "warnings": [r for r in rows if r["status"] in ("failed", "unmapped", "no_candidate", "ahead") or r.get("stale_error")],
         "packages": rows,
     }
 
@@ -125,7 +127,10 @@ def notice_text(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Warnings:")
         for row in warnings:
-            lines.append(f"  {row['cp']:<34} [{row['status']}] {row.get('message', '')}")
+            if row.get("stale_error"):
+                lines.append(f"  {row['cp']:<34} [{row['status']}; stale cache] {row['stale_error']}")
+            else:
+                lines.append(f"  {row['cp']:<34} [{row['status']}] {row.get('message', '')}")
     return "\n".join(lines) + "\n"
 
 

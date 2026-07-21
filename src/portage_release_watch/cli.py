@@ -76,6 +76,8 @@ def command_check(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
     elif not args.quiet or report.get("updates") or report.get("warnings") or changed:
         print(notice, end="")
+    if report["summary"].get("failed"):
+        return 1
     return 2 if args.fail_on_updates and report.get("updates") else 0
 
 
@@ -132,8 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Check Gentoo Portage local overlay ebuilds for newer upstream releases",
         epilog=(
-            "Exit codes: 0 success; 1 expected operational failure; "
-            "2 invalid command usage or check --fail-on-updates found updates."
+            "Exit codes: 0 success (including stale-cache degradation); "
+            "1 operational or package provider failure; 2 invalid command usage, "
+            "or check --fail-on-updates found updates without failed rows."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}", help="Show the package version and exit")
@@ -157,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--notify", action="store_true", help="Notify after a persisted full check; incompatible with --package")
     p_check.add_argument("--refresh", action="store_true", help="Refresh provider responses instead of using fresh cache entries")
     p_check.add_argument("--no-write", action="store_true", help="Print the report without writing canonical state or notifying")
-    p_check.add_argument("--fail-on-updates", action="store_true", help="Exit 2 when the report contains available updates")
+    p_check.add_argument("--fail-on-updates", action="store_true", help="Exit 2 when updates exist and no package row failed")
     p_check.set_defaults(func=command_check)
 
     p_list = sub.add_parser("list", help="Show latest cached report", description="Show the latest cached report without overlay or network access.")
