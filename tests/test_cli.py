@@ -7,7 +7,7 @@ import pytest
 
 import portage_release_watch.cli as cli_module
 from portage_release_watch import __version__
-from portage_release_watch.cli import build_parser, main
+from portage_release_watch.cli import main
 
 from helpers import CACHE, OVERLAY, install_fake_portage
 
@@ -437,14 +437,27 @@ def test_version_uses_package_metadata_without_overlay(
     assert len(captured.out.splitlines()) == 1
 
 
-def test_install_config_omission_is_distinguishable_at_parse_boundary():
-    parser = build_parser()
-    assert parser.parse_args(["install-system"]).install_config is None
+def test_install_config_omission_is_preserved_through_dispatch(monkeypatch):
+    delivered = []
+
+    def capture(args):
+        delivered.append(args.install_config)
+        return 0
+
+    monkeypatch.setattr(cli_module, "install_system", capture)
     explicit = Path("/tmp/custom-release-watch.json")
-    assert (
-        parser.parse_args(["install-system", "--config", str(explicit)]).install_config
-        == explicit
-    )
+
+    assert main(["install-system", "--overlay", str(OVERLAY)]) == 0
+    assert main(
+        [
+            "install-system",
+            "--overlay",
+            str(OVERLAY),
+            "--config",
+            str(explicit),
+        ]
+    ) == 0
+    assert delivered == [None, explicit]
 
 
 def test_full_check_still_writes_and_invokes_notification_contract(
