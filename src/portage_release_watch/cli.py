@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
 
-from .config import DEFAULT_CACHE_DIR, DEFAULT_STATE_DIR, SYSTEM_CACHE_DIR, SYSTEM_STATE_DIR, detect_default_overlay, load_config, load_github_token
+from .config import DEFAULT_CACHE_DIR, DEFAULT_STATE_DIR, SYSTEM_CACHE_DIR, SYSTEM_STATE_DIR, SYSTEM_POLICY_PATH, detect_default_overlay, load_config, load_github_token, prepare_root_directory, trusted_path
 from .http import HttpClient, atomic_write_json, atomic_write_text
 from .install import install_system
 from .models import WatchError
-from .notify import maybe_notify
+from .notify import maybe_notify, state_lock
 from .overlay import scan_overlay
 from .report import build_report, details_text, evaluate_package, live_text, load_latest_report, notice_text, report_path_for_read
 from .sources import resolve_rule
 
 
 def command_scan(args: argparse.Namespace) -> int:
-    config, sources = load_config(args.config, args.overlay)
+    config, sources = load_config(args.config, args.overlay, args.policy)
     infos = scan_overlay(args.overlay)
     rows = []
     for cp, info in sorted(infos.items()):
@@ -47,9 +48,20 @@ def command_scan(args: argparse.Namespace) -> int:
 def command_check(args: argparse.Namespace) -> int:
     if args.package and args.notify:
         raise WatchError("--package cannot be combined with --notify; scoped checks are not persisted")
-
-    config, sources = load_config(args.config, args.overlay)
+    config, sources = load_config(args.config, args.overlay, args.policy)
     token = load_github_token(config)
+
+    if os.geteuid() == 0:
+        prepare_root_directory(args.cache_dir, 0o700)
+    if not args.no_write and args.package is None:
+        if os.geteuid() == 0:
+            prepare_root_directory(args.state_dir, 0o755)
+        with state_lock(args.state_dir):
+            return _command_check(args, config, sources, token)
+    return _command_check(args, config, sources, token)
+
+
+def _command_check(args: argparse.Namespace, config: dict, sources: list[str], token: str | None) -> int:
     http = HttpClient(args.cache_dir / "http", args.timeout_seconds, args.max_age_hours, token)
     infos = scan_overlay(args.overlay)
     selected = sorted(infos)
@@ -66,11 +78,14 @@ def command_check(args: argparse.Namespace) -> int:
         atomic_write_text(args.state_dir / "latest-notice.txt", notice, mode=0o644)
         hist = args.state_dir / "history.ndjson"
         hist.parent.mkdir(parents=True, exist_ok=True)
+        if os.geteuid() == 0:
+            trusted_path(hist, missing_ok=True)
         with hist.open("a") as f:
             f.write(json.dumps({"generated_at": report["generated_at"], "summary": report["summary"]}, sort_keys=True) + "\n")
     changed = False
     if args.notify and persist:
-        hooks_dir = Path(config.get("notify_hooks_dir", args.state_dir / "notify.d"))
+        hooks_setting = config.get("notify_hooks_dir", args.state_dir / "notify.d")
+        hooks_dir = Path(hooks_setting) if hooks_setting is not None else None
         changed = maybe_notify(report, notice, args.state_dir, config.get("notify_repeat_hours", 168), True, hooks_dir)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -110,7 +125,7 @@ def command_live(args: argparse.Namespace) -> int:
 
 
 def command_explain(args: argparse.Namespace) -> int:
-    config, _sources = load_config(args.config, args.overlay)
+    config, _sources = load_config(args.config, args.overlay, args.policy)
     infos = scan_overlay(args.overlay)
     if args.package not in infos:
         raise WatchError(f"package not found: {args.package}")
@@ -132,6 +147,7 @@ def _add_json(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="portage-release-watch",
         description="Check Gentoo Portage local overlay ebuilds for newer upstream releases",
         epilog=(
             "Exit codes: 0 success (including stale-cache degradation); "
@@ -142,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}", help="Show the package version and exit")
     parser.add_argument("--overlay", type=Path, default=None, metavar="PATH", help="Portage overlay for scan, check, or explain; autodetected when omitted")
     parser.add_argument("--config", type=Path, default=None, metavar="PATH", help="JSON configuration override for overlay-consuming commands")
+    parser.add_argument("--policy", type=Path, default=None, metavar="PATH", help="Root-controlled operational policy (default /etc/portage/release-watch.policy.json for root)")
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR, metavar="PATH", help="Directory for canonical reports and notification state")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, metavar="PATH", help="Directory for cached provider responses")
     parser.add_argument("--system", action="store_true", help="Read/write canonical root state under /var/lib and /var/cache")
@@ -190,6 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--state-dir", dest="install_state_dir", type=Path, default=Path("/var/lib/portage-release-watch"), metavar="PATH", help="State directory embedded in generated runners")
     p_install.add_argument("--cache-dir", dest="install_cache_dir", type=Path, default=Path("/var/cache/portage-release-watch"), metavar="PATH", help="Cache directory embedded in generated runners")
     p_install.add_argument("--notify-hooks-dir", type=Path, default=Path("/etc/portage/release-watch.notify.d"), metavar="PATH", help="Directory for executable notification hooks")
+    p_install.add_argument("--policy", dest="install_policy", type=Path, default=SYSTEM_POLICY_PATH, metavar="PATH", help="Admin-managed root policy embedded in runners")
+    p_install.add_argument("--upgrade", action="store_true", help="Replace only recorded, unmodified installation files or exact supported legacy scripts")
+    p_install.add_argument("--legacy-source", type=Path, metavar="PATH", help="With --upgrade, recognize the old PYTHONPATH wrapper using this exact src directory")
     p_install.add_argument("--scheduler", choices=("cron", "none"), default="none", help="Install a cron runner or no scheduler")
     p_install.add_argument("--postsync", dest="postsync", action="store_true", default=False, help="Install the Portage postsync runner")
     p_install.add_argument("--no-postsync", dest="postsync", action="store_false", help="Do not install the Portage postsync runner")
@@ -212,8 +232,12 @@ def _resolve_common_args(args: argparse.Namespace) -> None:
     if args.system:
         args.state_dir = SYSTEM_STATE_DIR
         args.cache_dir = SYSTEM_CACHE_DIR
-    args.state_dir = args.state_dir.expanduser().resolve()
-    args.cache_dir = args.cache_dir.expanduser().resolve()
+    if os.geteuid() == 0:
+        args.state_dir = args.state_dir.expanduser().absolute()
+        args.cache_dir = args.cache_dir.expanduser().absolute()
+    else:
+        args.state_dir = args.state_dir.expanduser().resolve()
+        args.cache_dir = args.cache_dir.expanduser().resolve()
 
 
 def main(argv: list[str] | None = None) -> int:

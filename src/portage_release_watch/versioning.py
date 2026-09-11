@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+
+from packaging.version import InvalidVersion, Version
 
 from .models import Candidate, PackageInfo, WatchError
 
 PRERELEASE_RE = re.compile(r"(?:alpha|beta|rc|pre|preview|dev|nightly|snapshot)", re.I)
 PORTAGE_REQUIRED = "Gentoo Portage Python API is required for version comparison; run on Gentoo with sys-apps/portage installed."
+_PYTHON_PRE_SUFFIXES = {"a": "alpha", "b": "beta", "rc": "rc"}
 
 
 def compare_versions(a: str, b: str) -> int:
@@ -33,20 +37,55 @@ def newest_infos(infos: list[PackageInfo]) -> PackageInfo:
     return best
 
 
+def normalize_version(version: str, source: dict) -> str | None:
+    normalization = source.get("normalize")
+    if normalization is None:
+        return version
+    if normalization == "debian-hyphen-to-gentoo-dot":
+        return version.replace("-", ".")
+    if normalization == "date-dotted-to-compact":
+        if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", version):
+            return None
+        try:
+            datetime.strptime(version, "%Y.%m.%d")
+        except ValueError:
+            return None
+        return version.replace(".", "")
+    if normalization == "python-to-gentoo":
+        try:
+            parsed = Version(version)
+        except InvalidVersion:
+            return None
+        if parsed.epoch or parsed.local:
+            raise WatchError(f"Python version epochs and local identifiers cannot map to Portage: {version!r}")
+        normalized = ".".join(map(str, parsed.release))
+        if parsed.pre is not None:
+            kind, number = parsed.pre
+            normalized += f"_{_PYTHON_PRE_SUFFIXES[kind]}{number}"
+        if parsed.post is not None:
+            normalized += f"_p{parsed.post}"
+        if parsed.dev is not None:
+            if parsed.pre is None and parsed.post is None:
+                normalized += "_alpha0_alpha0"
+            normalized += f"_pre{parsed.dev}"
+        return normalized
+    raise WatchError(f"unsupported normalize {normalization!r}")
+
+
 def extract_version(raw: str, source: dict) -> str | None:
+    version = raw.strip()
     regex = source.get("version_regex")
     if regex:
-        m = re.search(regex, raw)
-        if not m:
+        match = re.search(regex, raw)
+        if not match:
             return None
-        if "version" in m.groupdict():
-            return m.group("version")
-        if m.groups():
-            return m.group(1)
-    version = raw.strip()
+        if "version" in match.groupdict():
+            version = match.group("version")
+        elif match.groups():
+            version = match.group(1)
     if version.startswith(("v", "V")) and re.match(r"^[vV]\d", version):
         version = version[1:]
-    return version
+    return normalize_version(version, source)
 
 
 def candidate_allowed(raw: str, version: str, source: dict) -> bool:

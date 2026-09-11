@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -54,15 +55,6 @@ def test_cli_check_no_write_json_uses_fixture_cache(tmp_path, capsys, monkeypatc
     assert not (state / "latest-report.json").exists()
 
 
-def test_default_command_is_status_without_overlay(tmp_path, capsys, monkeypatch):
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "latest-report.json").write_text(json.dumps(_cached_report()))
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("PORTAGE_RELEASE_WATCH_OVERLAY", raising=False)
-    code = main(["--state-dir", str(state), "--cache-dir", str(CACHE)])
-    assert code == 0
-    assert "Updates available: none" in capsys.readouterr().out
 
 
 def test_install_system_dry_run_lists_files_without_writing(tmp_path, capsys):
@@ -437,77 +429,53 @@ def test_version_uses_package_metadata_without_overlay(
     assert len(captured.out.splitlines()) == 1
 
 
-def test_install_config_omission_is_preserved_through_dispatch(monkeypatch):
-    delivered = []
-
-    def capture(args):
-        delivered.append(args.install_config)
-        return 0
-
-    monkeypatch.setattr(cli_module, "install_system", capture)
-    explicit = Path("/tmp/custom-release-watch.json")
-
-    assert main(["install-system", "--overlay", str(OVERLAY)]) == 0
-    assert main(
-        [
-            "install-system",
-            "--overlay",
-            str(OVERLAY),
-            "--config",
-            str(explicit),
-        ]
-    ) == 0
-    assert delivered == [None, explicit]
 
 
-def test_full_check_still_writes_and_invokes_notification_contract(
-    tmp_path, capsys, monkeypatch
+@pytest.mark.parametrize("hooks_enabled", [False, True])
+def test_full_check_persists_report_with_optional_notification_hooks(
+    tmp_path, capsys, monkeypatch, hooks_enabled
 ):
     install_fake_portage(monkeypatch)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("PORTAGE_RELEASE_WATCH_GITHUB_TOKEN", raising=False)
+    # Do not send test notices to the host logger.
+    monkeypatch.setenv("PATH", str(tmp_path / "no-programs"))
     state = tmp_path / "state"
     hooks = tmp_path / "notify.d"
+    hooks.mkdir()
+    marker = tmp_path / "notification"
+    hook = hooks / "record"
+    hook.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$PORTAGE_RELEASE_WATCH_STATUS" > '
+        + shlex.quote(str(marker))
+        + "\n"
+    )
+    hook.chmod(0o755)
     config = tmp_path / "config.json"
-    config.write_text(
-        json.dumps({"notify_hooks_dir": str(hooks), "notify_repeat_hours": 42})
-    )
-    calls = []
-
-    def record_notify(*args):
-        calls.append(args)
-        return True
-
-    monkeypatch.setattr(cli_module, "maybe_notify", record_notify)
-    code = main(
-        [
-            "--overlay",
-            str(OVERLAY),
-            "--config",
-            str(config),
-            "--state-dir",
-            str(state),
-            "--cache-dir",
-            str(CACHE),
-            "check",
-            "--json",
-            "--notify",
-        ]
-    )
+    config.write_text(json.dumps({
+        "notify_hooks_dir": str(hooks) if hooks_enabled else None,
+        "notify_repeat_hours": 42,
+    }))
+    code = main([
+        "--overlay", str(OVERLAY),
+        "--config", str(config),
+        "--state-dir", str(state),
+        "--cache-dir", str(CACHE),
+        "check", "--json", "--notify",
+    ])
 
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert json.loads((state / "latest-report.json").read_text()) == payload
-    notice = (state / "latest-notice.txt").read_text()
-    history = [json.loads(line) for line in (state / "history.ndjson").read_text().splitlines()]
-    assert history == [
-        {"generated_at": payload["generated_at"], "summary": payload["summary"]}
+    history = [
+        json.loads(line)
+        for line in (state / "history.ndjson").read_text().splitlines()
     ]
-    assert len(calls) == 1
-    report_arg, notice_arg, state_arg, repeat_arg, logger_arg, hooks_arg = calls[0]
-    assert report_arg == payload
-    assert notice_arg == notice
-    assert state_arg == state.resolve()
-    assert repeat_arg == 42
-    assert logger_arg is True
-    assert hooks_arg == hooks
+    assert history == [{
+        "generated_at": payload["generated_at"],
+        "summary": payload["summary"],
+    }]
+    if hooks_enabled:
+        assert marker.read_text().strip() == "updates"
+    else:
+        assert not marker.exists()

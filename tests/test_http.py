@@ -248,3 +248,30 @@ def test_bytes_reads_legacy_text_body_cache(tmp_path, monkeypatch):
 
     assert result.body == b"\xfflegacy"
     assert result.stale_error is None
+
+
+def test_file_provider_cannot_read_local_file_or_reuse_legacy_cache(tmp_path):
+    client = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    secret = tmp_path / "secret"
+    secret.write_text("private-version-1.2.3")
+    url = secret.as_uri()
+    with pytest.raises(WatchError):
+        client.get_text(url)
+    client._cache_path(url).write_text(json.dumps({"fetched_at": 4102444800, "body": secret.read_text()}))
+    with pytest.raises(WatchError):
+        client.get_text(url)
+
+
+def test_github_redirect_does_not_forward_token(tmp_path, monkeypatch):
+    import urllib.request
+    client = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24, token="private-token")
+    redirected = []
+
+    def redirect(request, timeout):
+        redirected.append(urllib.request.HTTPRedirectHandler().redirect_request(
+            request, None, 302, "Found", {}, "https://example.invalid/redirected"))
+        return _Response(b"[]")
+
+    monkeypatch.setattr("urllib.request.urlopen", redirect)
+    client.get_json("https://api.github.com/repos/owner/project/releases")
+    assert redirected[0].get_header("Authorization") is None

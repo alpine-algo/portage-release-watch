@@ -71,11 +71,15 @@ System dry-run:
 scripts/install-system.sh --dry-run --overlay /path/to/local/overlay --scheduler cron --postsync
 ```
 
-A workstation-style install with daily cron and sync-time visibility is explicit:
+A workstation-style install with daily cron and sync-time visibility is explicit. First create the root-owned operational policy described under [Configuration](#configuration) (`{}` is sufficient for the defaults); generated runners explicitly select that file and fail if it is missing:
 
 ```sh
 sudo scripts/install-system.sh --overlay /path/to/local/overlay --scheduler cron --postsync
 ```
+
+The installer copies the runtime into a root-owned directory under the selected prefix (`/usr/local/lib/portage-release-watch` by default). Launchers use `/usr/bin/python3 -I -B`; cron and postsync do not import from a writable checkout. The installer does not install dependencies: `packaging` and the Gentoo Portage Python API must be available to that system interpreter, not only in a user environment or pipx virtual environment. Run the installer only from source you trust; its private staging copy isolates imports but does not authenticate the checkout.
+
+Replacing changed receipt-managed files requires `--upgrade`; identical files can be reinstalled without it. Locally modified or unrecorded destination files are refused. Migrating an old checkout-importing launcher also requires `--legacy-source /absolute/path/to/checkout/src`; only the exact recognized legacy files are replaceable. Repeat the desired prefix, paths, `--scheduler cron`, and `--postsync` options during upgrades. Options such as `--scheduler none`, `--no-postsync`, and `--no-alias-prw` omit those files from the plan; they do not remove or update previously installed files.
 
 <p align="center">
   <img src="docs/assets/terminal-report-snapshot.png" alt="portage-release-watch terminal report showing updates, manual checks, and live-only ebuild status" width="100%">
@@ -128,6 +132,14 @@ Dynamic source discovery is enabled by default. Explicit config always wins. If 
 
 The scanner intentionally ignores `HOMEPAGE`-only links because those are often documentation, issue trackers, mirrors, or stale historical project pages. Prefer `.release-watch.json` for ambiguous packages instead of broad heuristics that guess from homepages.
 
+### Version normalization
+
+PyPI sources translate Python prerelease, development, and postrelease versions into Portage suffixes before filtering and comparison. Raw release names remain available for upstream URLs. Nonzero epochs and local version identifiers fail explicitly rather than producing a misleading ordering. An explicit `"normalize": null` disables this conversion.
+
+Other sources can select `"normalize": "python-to-gentoo"`, `"debian-hyphen-to-gentoo-dot"`, or `"date-dotted-to-compact"`. Calendar normalization validates the date before converting an upstream tag such as `2026.07.29` to `20260729`.
+
+The `mozilla-nightly` provider cross-checks Mozilla's product details, current build metadata, dated build metadata, and artifact listing. It returns an immutable dated artifact identified by its BuildID; it does not treat a rolling `latest` download as a reproducible release.
+
 ## 9999 / live ebuild behavior
 
 `9999` ebuilds do not have a normal fixed upstream version. The watcher handles them conservatively:
@@ -153,19 +165,28 @@ Config merge order is deterministic. Later files override earlier keys recursive
 3. `<overlay>/.release-watch.json`, if present;
 4. `--config PATH`, if supplied.
 
-Malformed or unreadable config files fail with a concise path-specific error. The schema remains version `2`; this milestone does not rewrite or migrate configuration.
+Malformed or unreadable config files fail with a concise path-specific error. The mapping schema remains version `2`. Privileged operational settings are separate from these package-mapping files.
 
-Built-in defaults:
+Package-mapping defaults:
 
 ```json
 {
   "schema_version": 2,
   "dynamic": { "enabled": true },
-  "notify_repeat_hours": 168,
-  "notify_hooks_dir": "/etc/portage/release-watch.notify.d",
   "packages": {}
 }
 ```
+
+When running as root, mapping files contribute only `schema_version`, `dynamic`, and `packages`; operational keys in those files are ignored. Root reads operational policy from `/etc/portage/release-watch.policy.json` when present, or from an explicit `--policy PATH`:
+
+```json
+{
+  "notify_repeat_hours": 168,
+  "notify_hooks_dir": "/etc/portage/release-watch.notify.d"
+}
+```
+
+The policy accepts only those two keys and optional `github_token_file`. Its file and ancestor paths must be root-owned, non-symlink, and not group/world-writable; a root-owned mode `0644` policy under `/etc/portage` is suitable. Setting `notify_hooks_dir` to `null` disables executable hooks. Unprivileged runs may still use operational settings in ordinary user-controlled configuration. Explicit `--policy PATH` requires an existing trusted policy even for an unprivileged run.
 
 See `examples/release-watch.json` for generic overrides covering prefixed upstream tags, opt-in prerelease tags, `.deb` control metadata, vendor URL/JSON regex checks, and live-only channels.
 
@@ -181,7 +202,9 @@ State/cache defaults:
 
 - root/system mode: `/var/lib/portage-release-watch` and `/var/cache/portage-release-watch`;
 - unprivileged mode: `~/.local/state/portage-release-watch` and `~/.cache/portage-release-watch`;
-- overrides: `PORTAGE_RELEASE_WATCH_STATE` and `PORTAGE_RELEASE_WATCH_CACHE`.
+- unprivileged environment overrides: `PORTAGE_RELEASE_WATCH_STATE` and `PORTAGE_RELEASE_WATCH_CACHE`. Root ignores these environment overrides; explicit CLI paths must pass the privileged path checks.
+
+Root creates cache directories with mode `0700`. Canonical reports and notices are readable by other local users; keep credentials and sensitive URLs out of package mappings and reportable provider data. HTTP(S) package mappings still control network destinations; the policy split is not a network sandbox.
 
 ## Scheduling and notifications
 
@@ -190,7 +213,7 @@ State/cache defaults:
 </p>
 <p align="center"><em>System integration is opt-in: package installation does not silently enable cron, postsync hooks, or notifications.</em></p>
 
-`install-system` writes files only when explicitly invoked. Defaults are safe: `--scheduler none` and `--no-postsync`.
+`install-system` writes files only when explicitly invoked. Defaults are `--scheduler none` and `--no-postsync`. A dry run prints a plan; it does not certify that a subsequent privileged installation will pass every filesystem trust check.
 
 Options:
 
@@ -201,22 +224,27 @@ Options:
 --state-dir PATH
 --cache-dir PATH
 --notify-hooks-dir PATH
+--policy PATH
+--upgrade
+--legacy-source PATH
 --scheduler cron|none
 --postsync / --no-postsync
 --alias-prw / --no-alias-prw
 --dry-run
 ```
 
-`--config` is optional. When omitted, the current installer behavior uses `/etc/portage/release-watch.json`; an explicit path remains distinguishable at the CLI parse boundary.
+`--config` is optional. When omitted, generated runners use the normal configuration lookup rather than embedding a fixed fallback file. Operational policy is administrator-managed and is not overwritten by the installer. If selecting a custom notification directory, configure the same path in policy as well as provisioning it with `--notify-hooks-dir`.
 
-Daily cron uses `/etc/cron.daily/portage-release-watch` when `--scheduler cron` is requested. Sync-time visibility uses `/etc/portage/postsync.d/90-portage-release-watch` when `--postsync` is requested. The postsync hook uses a short timeout and the HTTP cache so a provider outage should not block normal sync workflows.
+Daily cron uses `/etc/cron.daily/portage-release-watch` when `--scheduler cron` is requested. Sync-time visibility uses `/etc/portage/postsync.d/90-portage-release-watch` when `--postsync` is requested. The postsync hook uses an eight-second HTTP request timeout and the HTTP cache, not an overall execution deadline: multiple requests, waiting for another canonical check, or notification hooks can extend sync time.
 
-Notification dedupe repeats only when the update/manual/warning signal changes or `notify_repeat_hours` elapses. Executable hooks in `notify_hooks_dir` receive the report path as argv 1 and these environment variables:
+Canonical checks are serialized per state directory so cron and postsync cannot race report or notification updates. Notification dedupe repeats only when the update/manual/warning signal changes or `notify_repeat_hours` elapses. Root validates the notification directory and executable hooks as trusted root-owned paths. Hooks receive the report path as argv 1 and these environment variables:
 
 ```text
 PORTAGE_RELEASE_WATCH_REPORT
 PORTAGE_RELEASE_WATCH_STATUS
 ```
+
+Root runs hooks with a minimal environment: `PATH=/usr/sbin:/usr/bin:/sbin:/bin`, `HOME=/root`, `LANG=C.UTF-8`, plus the two variables above. Hooks must not depend on inherited user-session variables.
 
 ## GitHub rate limits and tokens
 
@@ -226,7 +254,7 @@ The default workload is small. JSON, text/HTML, and Debian binary provider respo
 export PORTAGE_RELEASE_WATCH_GITHUB_TOKEN=...
 ```
 
-`GITHUB_TOKEN` is also honored. A config file may specify `github_token_file`, but public examples avoid machine-local token paths. When neither environment token is set, a configured token file must exist, be readable UTF-8, and contain a non-empty token; otherwise the command exits `1` without printing token content.
+Unprivileged runs honor `GITHUB_TOKEN` and `PORTAGE_RELEASE_WATCH_GITHUB_TOKEN`. Root ignores both environment variables and accepts a token only through `github_token_file` in trusted operational policy. That token file must be root-owned, root-private, readable UTF-8, and non-empty. Invalid token files fail without printing their contents. Authorization is restricted to GitHub API requests and is not forwarded through redirects.
 
 If a fetch or revalidation fails and a usable cached body exists, the package keeps its normal primary status and the current report adds a sanitized `stale_error` warning; a fresh hit, successful fetch, or `304` has no stale marker. Without usable cached data the package row is `failed`; `check` still emits and persists the full report before exiting `1`. Authentication tokens are not written to cache entries or failure text.
 
@@ -238,7 +266,7 @@ Non-Gentoo Linux is supported only for unit tests, fixture parsing, dry-run docu
 
 ## Packaging for Gentoo overlays
 
-The project has no runtime Python dependencies beyond the standard library and Gentoo Portage. It uses a `src/` package layout and `hatchling` build backend. A downstream ebuild can install the console scripts `portage-release-watch` and `prw`, then optionally install cron/postsync hooks from `hooks/` or invoke `install-system` during local administrator setup.
+Runtime requirements are Python, Gentoo Portage, and `packaging` (`dev-python/packaging` on Gentoo). The project uses a `src/` package layout and the `hatchling` build backend. A downstream ebuild can install the console scripts `portage-release-watch` and `prw`, then optionally install cron/postsync hooks from `hooks/` or invoke `install-system` during explicit administrator setup.
 
 Do not make package installation automatically enable cron or postsync. Those are administrator policy choices.
 

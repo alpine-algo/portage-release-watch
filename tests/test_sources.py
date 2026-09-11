@@ -4,11 +4,13 @@ import base64
 import io
 import json
 import tarfile
+import pytest
 
-from portage_release_watch.models import PackageInfo
+from portage_release_watch.models import PackageInfo, WatchError
 from portage_release_watch.overlay import scan_overlay
 from portage_release_watch.sources import fetch_candidates, resolve_rule
 from portage_release_watch.http import FetchResult, HttpClient
+from portage_release_watch.versioning import best_candidate
 
 
 def _ar_member(name: str, data: bytes) -> bytes:
@@ -44,6 +46,20 @@ def _cache_bytes(http: HttpClient, url: str, body: bytes) -> None:
         "fetched_at": 4102444800,
         "body_base64": base64.b64encode(body).decode("ascii"),
     }) + "\n")
+
+
+def test_pypi_prereleases_use_portage_versions_and_respect_policy(tmp_path):
+    pytest.importorskip("portage.versions", reason="requires Gentoo Portage Python API")
+    http = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    source = {"type": "pypi", "project": "capstone6pwndbg"}
+    releases = {version: [{"yanked": False}] for version in ("6.0.0a9", "6.0.0a6", "5.0.0")}
+    http._cache_path("https://pypi.org/pypi/capstone6pwndbg/json").write_text(
+        json.dumps({"fetched_at": 4102444800, "body": {"releases": releases}})
+    )
+    assert best_candidate(fetch_candidates(source, http).body).version == "5.0.0"
+    source["include_prereleases"] = True
+    latest = best_candidate(fetch_candidates(source, http).body)
+    assert (latest.raw, latest.version) == ("6.0.0a9", "6.0.0_alpha9")
 
 
 def test_dynamic_inference_prefers_src_uri_over_metadata(tmp_path):
@@ -159,3 +175,79 @@ def test_url_regex_uses_http_cache_contract(tmp_path, monkeypatch):
     assert calls == [("https://example.invalid/releases", True, "text/html, text/plain, */*")]
     assert [candidate.version for candidate in result.body] == ["2.4.0"]
     assert result.stale_error == "TimeoutError: upstream unavailable"
+
+
+def test_gitlab_com_inference_preserves_nested_namespace(tmp_path):
+    overlay = tmp_path / "overlay"
+    pkg = overlay / "cat/example"
+    pkg.mkdir(parents=True)
+    (pkg / "example-1.0.ebuild").write_text(
+        'EAPI=8\nSRC_URI="https://gitlab.com/owner/subgroup/example/-/archive/${PV}/${P}.tar.gz"\n'
+    )
+    info = PackageInfo("cat/example", "cat", "example", "1.0", "1.0", "example-1.0", "r0", False, ["example-1.0.ebuild"])
+    rule = resolve_rule({"dynamic": {"enabled": True}}, info, overlay)
+    assert rule["source"]["host"] == "gitlab.com"
+    assert rule["source"]["project"] == "owner/subgroup/example"
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab", "pypi", "url-regex", "deb-control"])
+def test_date_normalization_preserves_raw_across_providers(tmp_path, provider):
+    http = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    raw = "2026.07.29"
+    source = {"type": provider, "normalize": "date-dotted-to-compact"}
+    if provider == "github":
+        source.update(repo="owner/project", mode="tags")
+        url = "https://api.github.com/repos/owner/project/tags?per_page=100"
+        body = [{"name": raw}]
+    elif provider == "gitlab":
+        source.update(project="owner/project")
+        url = "https://gitlab.com/api/v4/projects/owner%2Fproject/repository/tags?per_page=100&order_by=version&sort=desc"
+        body = [{"name": raw}]
+    elif provider == "pypi":
+        source.update(project="example")
+        url = "https://pypi.org/pypi/example/json"
+        body = {"releases": {raw: []}}
+    else:
+        url = "https://example.invalid/releases"
+        source["url"] = url
+        body = raw
+        if provider == "url-regex":
+            source["version_regex"] = r"(?P<version>\d{4}\.\d{2}\.\d{2})"
+    if provider == "deb-control":
+        _cache_bytes(http, url, _deb_fixture(f"Package: example\nVersion: {raw}\n"))
+    else:
+        http._cache_path(url).write_text(json.dumps({"fetched_at": 4102444800, "body": body}))
+    result = fetch_candidates(source, http)
+    assert [(candidate.raw, candidate.version) for candidate in result.body] == [(raw, "20260729")]
+    source["normalize"] = None
+    assert fetch_candidates(source, http).body[0].version == raw
+
+
+@pytest.mark.parametrize("failure", [None, "mismatched-build", "missing-artifact"])
+def test_mozilla_nightly_requires_matching_immutable_artifact(tmp_path, failure):
+    http = HttpClient(tmp_path / "cache", timeout=1, max_age_hours=24)
+    base = "https://archive.mozilla.org/pub/firefox/nightly"
+    directory = base + "/2026/09/2026-09-10-14-32-52-mozilla-central/"
+    filename = "firefox-158.0a1.en-US.linux-x86_64"
+    metadata = {"buildid": "20260910143252", "moz_app_version": "158.0a1",
+                "moz_pkg_platform": "linux-x86_64", "moz_source_stamp": "revision"}
+    dated = dict(metadata)
+    if failure == "mismatched-build":
+        dated["buildid"] = "20260910143251"
+    responses = {
+        "https://product-details.mozilla.org/1.0/firefox_versions.json": {"FIREFOX_NIGHTLY": "158.0a1"},
+        f"{base}/latest-mozilla-central/{filename}.json": metadata,
+        f"{directory}{filename}.json": dated,
+        directory: "" if failure == "missing-artifact" else f'<a href="{filename}.tar.xz">download</a>',
+    }
+    for url, body in responses.items():
+        http._cache_path(url).write_text(json.dumps({"fetched_at": 4102444800, "body": body}))
+    source = {"type": "mozilla-nightly", "platform": "linux-x86_64", "locale": "en-US"}
+    if failure:
+        with pytest.raises(WatchError):
+            fetch_candidates(source, http)
+    else:
+        candidate = fetch_candidates(source, http).body[0]
+        assert candidate.version == "20260910143252"
+        assert candidate.raw == "158.0a1/20260910143252"
+        assert candidate.url == f"{directory}{filename}.tar.xz"

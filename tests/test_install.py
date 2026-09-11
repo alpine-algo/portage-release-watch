@@ -1,170 +1,68 @@
 from __future__ import annotations
 
-import shlex
+import hashlib
+import json
+import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-import portage_release_watch.install as install_module
-from portage_release_watch.install import PlannedFile, install_system
+from portage_release_watch.install import PlannedFile, _check_replacement, _runner_content
 from portage_release_watch.models import WatchError
 
 
-def _args(tmp_path: Path, **overrides) -> SimpleNamespace:
-    values = {
-        "install_overlay": tmp_path / "overlay",
-        "install_config": None,
-        "prefix": tmp_path / "prefix",
-        "install_state_dir": tmp_path / "state",
-        "install_cache_dir": tmp_path / "cache",
-        "notify_hooks_dir": tmp_path / "notify.d",
-        "scheduler": "none",
-        "postsync": False,
-        "alias_prw": True,
-        "dry_run": False,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
+def test_upgrade_refuses_unrecorded_or_locally_modified_files(tmp_path):
+    path = tmp_path / "command"
+    original = "#!/bin/sh\necho original\n"
+    item = PlannedFile(path, "#!/bin/sh\necho upgraded\n", 0o755)
+    path.write_text(original)
+    with pytest.raises(WatchError):
+        _check_replacement(item, {}, True, set())
+    receipts = {str(path): hashlib.sha256(original.encode()).hexdigest()}
+    with pytest.raises(WatchError):
+        _check_replacement(item, receipts, False, set())
+    _check_replacement(item, receipts, True, set())
+    path.write_text("#!/bin/sh\necho local-customization\n")
+    with pytest.raises(WatchError):
+        _check_replacement(item, receipts, True, set())
+    assert path.read_text().endswith("echo local-customization\n")
+
+
+def test_upgrade_only_accepts_exact_legacy_script_and_never_symlink(tmp_path):
+    path = tmp_path / "prw"
+    original = '#!/bin/sh\nexec python3 -m portage_release_watch.cli "$@"\n'
+    item = PlannedFile(path, "replacement", 0o755)
+    path.write_text(original)
+    _check_replacement(item, {}, True, {original})
+    path.write_text(original + "echo injected\n")
+    with pytest.raises(WatchError):
+        _check_replacement(item, {}, True, {original})
+    target = tmp_path / "other"
+    target.write_text(original)
+    path.unlink()
+    path.symlink_to(target)
+    with pytest.raises(WatchError):
+        _check_replacement(item, {}, True, {original})
+    assert target.read_text() == original
 
 
 @pytest.mark.parametrize("with_config", [False, True])
-def test_generated_runners_preserve_quoted_paths_and_optional_config(
-    with_config, tmp_path, monkeypatch
-):
-    prefix = tmp_path / "prefix with spaces"
+def test_runner_passes_paths_as_arguments_not_shell_programs(tmp_path, with_config):
+    executable = tmp_path / "command with spaces"
+    executable.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+    executable.chmod(0o755)
     overlay = tmp_path / "overlay;$(unsafe)"
-    state_dir = tmp_path / "state dir"
-    cache_dir = tmp_path / "cache dir"
     config = tmp_path / "config 'quoted'.json" if with_config else None
-    if config is not None:
-        config.write_text("{}")
-
-    args = _args(
-        tmp_path,
-        install_overlay=overlay,
-        install_config=config,
-        prefix=prefix,
-        install_state_dir=state_dir,
-        install_cache_dir=cache_dir,
-        scheduler="cron",
-        postsync=True,
-    )
-    planned: list[PlannedFile] = []
-    real_is_dir = Path.is_dir
-
-    def is_dir(path: Path) -> bool:
-        if path == Path("/etc/cron.daily"):
-            return True
-        return real_is_dir(path)
-
-    def capture(path: Path, content: str, mode: int) -> None:
-        planned.append(PlannedFile(path, content, mode))
-
-    monkeypatch.setattr(Path, "is_dir", is_dir)
-    monkeypatch.setattr(Path, "mkdir", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(install_module.os, "chmod", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(install_module.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(install_module, "_write_file", capture)
-
-    assert install_system(args) == 0
-
-    executable = prefix.resolve() / "bin/portage-release-watch"
-    cron_path = Path("/etc/cron.daily/portage-release-watch")
-    postsync_path = Path("/etc/portage/postsync.d/90-portage-release-watch")
-    by_path = {item.path: item for item in planned}
-    assert set(by_path) == {
-        executable,
-        prefix.resolve() / "bin/prw",
-        cron_path,
-        postsync_path,
-    }
-    assert all(item.mode == 0o755 for item in planned)
-
-    common = [
-        "exec",
-        str(executable),
-        "--overlay",
-        str(overlay.resolve()),
-    ]
-    quoted_paths = [executable, overlay.resolve(), state_dir.resolve(), cache_dir.resolve()]
-    if config is not None:
-        common.extend(("--config", str(config.resolve())))
-        quoted_paths.append(config.resolve())
-    common.extend(
-        (
-            "--state-dir",
-            str(state_dir.resolve()),
-            "--cache-dir",
-            str(cache_dir.resolve()),
-        )
-    )
-
-    for runner_path, timeout in ((cron_path, "30"), (postsync_path, "8")):
-        content = by_path[runner_path].content
-        command_line = content.splitlines()[1]
-        assert content.startswith("#!/bin/sh\n")
-        assert content.endswith("\n")
-        assert shlex.split(command_line) == [
-            *common,
-            "--timeout-seconds",
-            timeout,
-            "--max-age-hours",
-            "24",
-            "check",
-            "--quiet",
-            "--notify",
-        ]
-        assert "--system" not in command_line
-        assert ("--config" in command_line) is with_config
-        for path in quoted_paths:
-            assert shlex.quote(str(path)) in command_line
-
-
-def test_scheduler_and_postsync_remain_opt_in(tmp_path, capsys):
-    args = _args(tmp_path, dry_run=True)
-
-    assert install_system(args) == 0
-
-    output = capsys.readouterr().out
-    assert "/etc/cron.daily/portage-release-watch" not in output
-    assert "/etc/portage/postsync.d/90-portage-release-watch" not in output
-    assert str(tmp_path / "prefix/bin/portage-release-watch") in output
-    assert str(tmp_path / "prefix/bin/prw") in output
-    assert "Dry run: wrote nothing." in output
-
-
-@pytest.mark.parametrize(
-    ("failure", "expected"),
-    [("missing", "No such file or directory"), ("unreadable", "Permission denied")],
-)
-def test_explicit_unreadable_config_fails_before_install_writes(
-    failure, expected, tmp_path, capsys, monkeypatch
-):
-    config = tmp_path / "release-watch.json"
-    if failure == "unreadable":
-        config.write_text("{}")
-        target = config.resolve()
-        real_open = Path.open
-
-        def denied(path: Path, *args, **kwargs):
-            if path == target:
-                raise PermissionError(13, "Permission denied", str(path))
-            return real_open(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "open", denied)
-
-    def unexpected(*_args, **_kwargs):
-        pytest.fail("installer mutated the filesystem before validating config")
-
-    monkeypatch.setattr(install_module.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(Path, "mkdir", unexpected)
-    monkeypatch.setattr(install_module.os, "chmod", unexpected)
-    monkeypatch.setattr(install_module, "_write_file", unexpected)
-
-    with pytest.raises(WatchError, match="cannot read config") as exc_info:
-        install_system(_args(tmp_path, install_config=config))
-
-    assert expected in str(exc_info.value)
-    assert str(config.resolve()) in str(exc_info.value)
-    assert capsys.readouterr().out == ""
+    policy = tmp_path / "policy file"
+    state = tmp_path / "state dir"
+    cache = tmp_path / "cache dir"
+    runner = tmp_path / "runner"
+    runner.write_text(_runner_content(executable, overlay, config, state, cache, 8, policy))
+    result = subprocess.run(["/bin/sh", str(runner)], check=True, text=True, capture_output=True)
+    expected = ["--overlay", str(overlay)]
+    if config:
+        expected += ["--config", str(config)]
+    expected += ["--policy", str(policy), "--state-dir", str(state), "--cache-dir", str(cache),
+                 "--timeout-seconds", "8", "--max-age-hours", "24", "check", "--quiet", "--notify"]
+    assert json.loads(result.stdout) == expected

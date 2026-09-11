@@ -1,8 +1,6 @@
 {
   "schema_version": 2,
   "dynamic": { "enabled": true },
-  "notify_repeat_hours": 168,
-  "notify_hooks_dir": "/etc/portage/release-watch.notify.d",
   "packages": {
     "app-misc/example-ledger-like-bin": {
       "status": "auto",

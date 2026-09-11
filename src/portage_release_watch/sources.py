@@ -5,13 +5,14 @@ import json
 import re
 import tarfile
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .http import FetchResult, HttpClient
 from .models import Candidate, PackageInfo, WatchError
 from .overlay import read_metadata_remote_ids, read_selected_ebuild
-from .versioning import candidate_allowed, extract_version
+from .versioning import candidate_allowed, extract_version, normalize_version
 
 DEFAULT_INFERRED_VERSION_RE = r"(?P<version>\d+(?:\.\d+)+(?:[._-]?[A-Za-z][A-Za-z0-9]*)*)"
 DEFAULT_INFERRED_VERSION_REGEX = rf"^v?{DEFAULT_INFERRED_VERSION_RE}$"
@@ -50,7 +51,7 @@ def github_repo_from_url(url: str, info: PackageInfo) -> str | None:
 
 def gitlab_project_from_url(url: str, info: PackageInfo) -> tuple[str, str] | None:
     url = _replace_known_vars(url, info)
-    m = re.search(r"""https?://(?P<host>gitlab(?:\.gnome)?\.org)/(?P<project>[^\s)"']+?)(?:\.git|/-/|/archive|$)""", url)
+    m = re.search(r"""https?://(?P<host>gitlab(?:\.com|(?:\.gnome)?\.org))/(?P<project>[^\s)"']+?)(?:\.git|/-/|/archive|$)""", url)
     if not m:
         return None
     project = m.group("project").strip("/")
@@ -230,9 +231,10 @@ def pypi_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> Fe
     result = http.get_json(url, force=force)
     data = result.body
     releases = data.get("releases", {}) if isinstance(data, dict) else {}
+    normalized_source = {"normalize": "python-to-gentoo", **source}
     candidates: list[Candidate] = []
     for raw, files in releases.items():
-        version = extract_version(raw, source)
+        version = extract_version(raw, normalized_source)
         if not version or not candidate_allowed(raw, version, source):
             continue
         if files and all(f.get("yanked") for f in files if isinstance(f, dict)):
@@ -252,8 +254,8 @@ def url_regex_candidates(source: dict[str, Any], http: HttpClient, force: bool) 
     candidates = []
     for m in re.finditer(source["version_regex"], result.body):
         raw = m.group("version") if "version" in m.groupdict() else (m.group(1) if m.groups() else m.group(0))
-        version = extract_version(raw, {k: v for k, v in source.items() if k != "version_regex"}) or raw
-        if candidate_allowed(raw, version, source):
+        version = extract_version(raw, {k: v for k, v in source.items() if k != "version_regex"})
+        if version and candidate_allowed(raw, version, source):
             candidates.append(Candidate(raw, version, url, f"url:{url}"))
     return FetchResult(candidates, result.stale_error)
 
@@ -325,16 +327,52 @@ def deb_control_candidates(source: dict[str, Any], http: HttpClient, force: bool
     raw = fields.get(source.get("field", "Version").lower())
     if not raw:
         return FetchResult([], result.stale_error)
-    normalize = source.get("normalize")
-    if normalize is None:
-        version = raw
-    elif normalize == "debian-hyphen-to-gentoo-dot":
-        version = raw.replace("-", ".")
-    else:
-        raise WatchError(f"{source_id}: unsupported normalize {normalize!r}")
-    if not candidate_allowed(raw, version, source):
+    version = normalize_version(raw, source)
+    if not version or not candidate_allowed(raw, version, source):
         return FetchResult([], result.stale_error)
     return FetchResult([Candidate(raw, version, url, source_id)], result.stale_error)
+
+
+def mozilla_nightly_candidates(source: dict[str, Any], http: HttpClient, force: bool) -> FetchResult[list[Candidate]]:
+    details_url = source.get("product_details_url", "https://product-details.mozilla.org/1.0/firefox_versions.json")
+    platform = source.get("platform", "linux-x86_64")
+    locale = source.get("locale", "en-US")
+    if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value) for value in (platform, locale)):
+        raise WatchError("mozilla-nightly: invalid platform or locale")
+    details = http.get_json(details_url, force=force)
+    version = details.body.get("FIREFOX_NIGHTLY") if isinstance(details.body, dict) else None
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+a1", version):
+        raise WatchError("mozilla-nightly: invalid FIREFOX_NIGHTLY")
+    basename = f"firefox-{version}.{locale}.{platform}"
+    base_url = "https://archive.mozilla.org/pub/firefox/nightly"
+    latest = http.get_json(f"{base_url}/latest-mozilla-central/{basename}.json", force=force)
+    metadata = latest.body
+    buildid = metadata.get("buildid") if isinstance(metadata, dict) else None
+    if not isinstance(buildid, str) or not re.fullmatch(r"\d{14}", buildid):
+        raise WatchError("mozilla-nightly: invalid buildid")
+    try:
+        timestamp = datetime.strptime(buildid, "%Y%m%d%H%M%S")
+    except ValueError as exc:
+        raise WatchError("mozilla-nightly: invalid build timestamp") from exc
+    if metadata.get("moz_app_version") != version or metadata.get("moz_pkg_platform") != platform:
+        raise WatchError("mozilla-nightly: product details and latest metadata disagree")
+    directory = f"{base_url}/{timestamp:%Y/%m/%Y-%m-%d-%H-%M-%S}-mozilla-central/"
+    immutable = http.get_json(f"{directory}{basename}.json", force=force)
+    if not isinstance(immutable.body, dict) or any(immutable.body.get(key) != metadata.get(key) for key in ("buildid", "moz_app_version", "moz_pkg_platform", "moz_source_stamp")):
+        raise WatchError("mozilla-nightly: dated metadata does not match latest build")
+    listing = http.get_text(directory, force=force)
+    artifact = f"{basename}.tar.xz"
+    links = re.findall(r'''href=["']([^"']+)["']''', listing.body)
+    artifact_url = directory + artifact
+    if not any(urllib.parse.urljoin(directory, link) == artifact_url for link in links):
+        raise WatchError("mozilla-nightly: dated artifact is missing")
+    normalized = normalize_version(buildid, source)
+    raw = f"{version}/{buildid}"
+    candidates = []
+    if normalized and candidate_allowed(raw, normalized, source):
+        candidates.append(Candidate(raw, normalized, artifact_url, "mozilla-nightly:firefox", timestamp.isoformat() + "Z", "verified"))
+    stale_error = "; ".join(dict.fromkeys(result.stale_error for result in (details, latest, immutable, listing) if result.stale_error)) or None
+    return FetchResult(candidates, stale_error)
 
 
 def fetch_candidates(
@@ -343,6 +381,8 @@ def fetch_candidates(
     force: bool = False,
 ) -> FetchResult[list[Candidate]]:
     typ = source.get("type")
+    if typ == "mozilla-nightly":
+        return mozilla_nightly_candidates(source, http, force)
     if typ == "github":
         return github_candidates(source, http, force)
     if typ == "gitlab":

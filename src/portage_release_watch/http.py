@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from .config import USER_AGENT
+from .config import USER_AGENT, prepare_root_directory, trusted_path
 from .models import WatchError
 
 
@@ -33,12 +33,17 @@ class HttpClient:
         self.timeout = timeout
         self.max_age = max_age_hours * 3600
         self.token = token
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if os.geteuid() == 0:
+            prepare_root_directory(self.cache_dir, 0o700)
+        else:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _cache_path(self, url: str) -> Path:
         return self.cache_dir / (hashlib.sha256(url.encode()).hexdigest() + ".json")
 
     def _read_cache(self, path: Path) -> dict[str, Any] | None:
+        if os.geteuid() == 0:
+            trusted_path(path, missing_ok=True)
         try:
             data = json.loads(path.read_text())
             return data if isinstance(data, dict) else None
@@ -67,6 +72,8 @@ class HttpClient:
         return self._get(url, force=force, accept=accept, payload_kind="bytes")
 
     def _get(self, url: str, *, force: bool, accept: str, payload_kind: str) -> FetchResult[Any]:
+        if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+            raise WatchError("provider URL must use HTTP or HTTPS")
         path = self._cache_path(url)
         cached = self._read_cache(path)
         usable, cached_body = self._cached_body(cached, payload_kind)
@@ -77,10 +84,7 @@ class HttpClient:
             return FetchResult(cached_body)
 
         headers = {"User-Agent": USER_AGENT, "Accept": accept}
-        if self.token:
-            target = urllib.parse.urlsplit(url)
-            if target.scheme == "https" and target.hostname == "api.github.com":
-                headers["Authorization"] = f"Bearer {self.token}"
+        target = urllib.parse.urlsplit(url)
         if cached and usable:
             if isinstance(cached.get("etag"), str):
                 headers["If-None-Match"] = cached["etag"]
@@ -88,6 +92,9 @@ class HttpClient:
                 headers["If-Modified-Since"] = cached["last_modified"]
 
         req = urllib.request.Request(url, headers=headers)
+        # Redirected requests must never forward a provider credential.
+        if self.token and target.scheme == "https" and target.hostname == "api.github.com":
+            req.add_unredirected_header("Authorization", f"Bearer {self.token}")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = self._decode_response(resp.read(), payload_kind)
